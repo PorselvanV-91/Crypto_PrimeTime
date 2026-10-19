@@ -45,7 +45,8 @@ sudo -u prime-time .venv/bin/python -m prime_time status
 sudo -u prime-time .venv/bin/python -m prime_time export --output runtime/export
 ```
 
-`runtime/paper.sqlite3` is the source of truth. It contains the position, completed
+`runtime/paper_v2.sqlite3` is the source of truth for the updated strategy.
+It contains the position, pending trigger, completed
 candles, decisions, entry/hold/exit events, trade records, and Telegram delivery
 status. CSV exports include `trade_analysis.csv`, with one row per trade.
 `runtime/paper.log` rotates at 5 MB with five backups; journald also captures logs.
@@ -68,7 +69,10 @@ new database path in `paper_config.json`, so experiments cannot silently mix.
 Finish the existing paper position before switching to another database.
 Systemd's default writable path requires any new database to remain under
 `/opt/prime-time/runtime/`. Set `stop_points` to a positive value only if you
-explicitly want to run a different experiment with a stop-loss.
+explicitly want to add a fixed-price stop as a separate experiment. The updated
+defaults already exit on an opposing 500-point candle body at candle closure.
+Buffered entry and that close-based stop use the fresh `paper_v2.sqlite3` database;
+finish the old experiment before updating so its position is not left unmanaged.
 
 Telegram is retried from the durable outbox after temporary failures. Delivery
 is at least once: a crash between Telegram accepting a message and the database

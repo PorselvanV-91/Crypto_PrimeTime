@@ -28,10 +28,10 @@ def main():
     replay.add_argument('--database', type=Path, default=Path('reports/momentum/replay.sqlite3'))
     replay.add_argument('--output', type=Path, default=Path('reports/momentum'))
     export = sub.add_parser('export', help='Export paper logs and flat trade CSV')
-    export.add_argument('--database', type=Path, default=Path('runtime/paper.sqlite3'))
+    export.add_argument('--database', type=Path, default=Path('runtime/paper_v2.sqlite3'))
     export.add_argument('--output', type=Path, default=Path('reports/paper'))
     status = sub.add_parser('status', help='Show persisted paper position and results')
-    status.add_argument('--database', type=Path, default=Path('runtime/paper.sqlite3'))
+    status.add_argument('--database', type=Path, default=Path('runtime/paper_v2.sqlite3'))
     args = parser.parse_args()
     if args.command == 'paper':
         from .paper_config import PaperConfig
@@ -62,6 +62,7 @@ def main():
             if args.command == 'status':
                 state = store.load_state()
                 result['position'] = state['position'] if state else None
+                result['pending_entry'] = state.get('pending') if state else None
                 result['pending_telegram'] = store.db.execute('SELECT count(*) FROM outbox WHERE sent_at IS NULL').fetchone()[0]
             else:
                 store.export(args.output)

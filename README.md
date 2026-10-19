@@ -12,20 +12,28 @@ This application cannot submit exchange orders.
 2. Evaluate **completed 15-minute candles**. Movement is close minus open,
    not high minus low. **Strictly above +200 points** signals BUY;
    **strictly below −200 points** signals SELL. Exactly ±200 does not qualify.
-3. Model entry at the **next candle's reported opening price**, with adverse
-   slippage. One open position at a time. Later trades may follow completed
-   trades; signals while holding cannot open overlapping positions.
-4. Target **200 price points from the modeled fill**. **No stop-loss**.
+3. Arm a breakout entry for the **next candle only**: BUY at the signal candle's
+   **high + 30 points**; SELL at its **low − 30 points**. Enter only when touched.
+   An unfilled trigger expires at that candle's close, and that closed candle
+   can generate a new signal. Gaps beyond a trigger fill at the worse opening
+   price. Adverse slippage is added. One pending entry or position at a time.
+4. Target **200 price points from the modeled fill**. Exit a BUY if a completed
+   candle's close minus open is **−500 points or less**; exit a SELL if it is
+   **+500 points or more**. This stop uses the candle body, not a wick or cumulative
+   loss from entry. Model the exit at that close with adverse slippage. A target
+   reached earlier in the candle takes priority over this close-only stop.
    Monitor targets during developing candles. Otherwise exit at the closing
    price of the **fourth 15-minute candle after entry** (entry candle counts as
    candle one), adjusted for slippage.
 5. Last eligible signal: **21:00–21:15 IST**. Its entry is at 21:15 and can run
    until **22:15 IST**. The service keeps running for the next day.
 
-Example: the 17:30 candle opens at 100,000 and closes at 100,250 at 17:45.
-BUY uses the 17:45 candle's open. If that is 100,270, default slippage models
-entry at 100,275 and target at 100,475. Without a target hit, exit at the 18:45
-close of the 18:30–18:45 candle.
+Example: the 17:30 candle opens at 100,000, reaches a high of 100,300 and closes
+at 100,250. Arm BUY at 100,330 for the 17:45–18:00 candle. If price touches it,
+default slippage models entry at 100,335 and target at 100,535. If it gaps open
+at 100,400, entry instead models 100,405. If no trigger touch occurs before
+18:00, no trade opens. A filled trade exits by 18:45 if neither target nor
+the opposite-body stop occurs first; the partially held entry candle counts as one.
 
 Crypto weekends and US holidays are included by default. `weekdays_only` can
 omit weekends. This evening window is independent of the US 09:30 stock open.
@@ -70,11 +78,14 @@ The runner polls every two seconds and waits two seconds after a candle boundary
 for closure confirmation. It uses completed candles rather than a five-second
 early prediction that could reverse before closure.
 
-Next-open entry is a **paper model**, not a guaranteed executable live fill:
-the opening print has already occurred when the previous close is confirmed.
-We model that open plus slippage and record the observed entry delay. Signals
-observed more than 20 seconds after the next open are skipped, including after
-outages. Missed new trades are never filled retrospectively.
+Triggered entry is a **paper model**, not a guaranteed executable live fill.
+Signals must be observed within 20 seconds of the next candle opening to arm
+an entry; late new signals are skipped. Once armed, the trigger can fill at any
+time during that next candle. Trigger and fill/observation details are logged.
+Persisted pending entries survive restarts. Recovering an already armed entry
+uses historical candles, but missed signals are never armed retrospectively.
+`entry_time` identifies the entry candle's opening time; an intrabar trigger's
+exact touch time is unknown and is labeled as such in the trade record.
 
 Targets use developing candle high/low. Exact touch times are unknown; exit
 observation time records when polling discovered the touch. The exit alert
@@ -88,17 +99,18 @@ guessing an exit; errors appear in the service log. Historical candle timestamps
 and the recovery observation timestamp are stored separately.
 
 Funding, dynamic spreads, order books, liquidation and margin are not modeled.
-Without a stop-loss, losses can exceed 200 points before the timed exit.
+The new stop waits for a qualifying candle close; it does not cap losses at 500
+points from entry. The optional fixed price stop (`stop_points`) remains disabled.
 
 ## Telegram and logs
 
-Alerts are sent on entry, each completed candle while holding, and exit. They
+Alerts are sent when a trigger is armed or expires, on entry, each completed candle while holding, and exit. They
 include trade ID, direction, prices, candle OHLC/body movement, IST timestamps,
 and exit reason/net result when closed. Every scanned closed candle and decision
 is logged. A target hit during a candle produces an immediate polling alert
 with that developing candle's snapshot.
 
-`runtime/paper.sqlite3` saves positions, candles, events, trades and a Telegram
+`runtime/paper_v2.sqlite3` saves positions, pending triggers, candles, events, trades and a Telegram
 outbox. Temporary delivery failures retry without losing trades. Credentials
 come from `.env` or environment variables (environment wins). Without credentials,
 alerts remain queued. Delivery is at least once: a crash after Telegram accepts
@@ -126,11 +138,23 @@ alerts. Replays require a fresh database; for another run:
 .\.venv\Scripts\python.exe -m prime_time replay --database reports/run2/replay.sqlite3 --output reports/run2
 ```
 
-The supplied historical data with default settings produced **494 closed trades,
+The earlier next-open strategy (before buffered entry and the opposite-body stop)
+on the supplied historical data produced **494 closed trades,
 314 target hits, 64.78% net win rate, and −68,246.29 net points** (−68.2463 USD
 at the modeled 0.001 BTC quantity). High target-hit frequency did not offset
 large timed-exit losses and costs. This is a paper research experiment, not
 evidence of a profitable strategy.
+
+The updated defaults use a fresh `runtime/paper_v2.sqlite3` database. Finish the
+old experiment before starting the new one; its database remains available for
+analysis with `status --database runtime/paper.sqlite3`. To reproduce the earlier
+entry behavior, use `entry_buffer_points: null` and
+`opposite_candle_stop_points: null` in a separate experiment configuration.
+
+With the updated buffered entry and opposite-body stop, the same historical
+proxy data produced **376 trades, 269 target hits, 71.54% net win rate, and
+−33,877.80 net points** (−33.8778 USD at 0.001 BTC). This is still negative
+after the configured costs; it is not an independently validated trading edge.
 
 ## Source and AWS
 

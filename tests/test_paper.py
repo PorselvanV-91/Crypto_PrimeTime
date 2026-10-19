@@ -50,7 +50,8 @@ class EngineTests(unittest.TestCase):
     def setUp(self):
         self.store = Store(':memory:')
         self.addCleanup(self.store.close)
-        self.cfg = PaperConfig(fee_bps_per_side=0, slippage_points_per_side=0)
+        self.cfg = PaperConfig(fee_bps_per_side=0, slippage_points_per_side=0,
+                               entry_buffer_points=None, opposite_candle_stop_points=None)
         self.engine = PaperEngine(self.cfg, self.store)
         self.t = timestamp('2026-10-19T16:30')
 
@@ -188,6 +189,104 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(result['target_hits'], 1)
         self.assertEqual(trade['exit_observed_at'], self.t+1802)
         self.assertEqual(trade['entry_observed_at'], self.t+902)
+
+
+class BufferedEntryTests(unittest.TestCase):
+    setUp = EngineTests.setUp
+    bars = EngineTests.bars
+    enter = EngineTests.enter
+    trades = EngineTests.trades
+
+    def buffered_engine(self):
+        self.cfg = PaperConfig(fee_bps_per_side=0, slippage_points_per_side=0)
+        self.engine = PaperEngine(self.cfg, self.store)
+        return self.engine
+
+    def test_buy_waits_for_signal_high_plus_30(self):
+        self.buffered_engine()
+        state = self.enter()
+        self.assertIsNone(state['position'])
+        self.assertEqual(state['pending']['trigger_price'], 1280)
+        current = Bar(self.t+900, 1250, 1280, 1240, 1270)
+        state = self.engine.step([current], self.t+930)
+        self.assertEqual(state['position']['entry_price'], 1280)
+        self.assertIsNone(state['pending'])
+
+    def test_sell_waits_for_signal_low_minus_30(self):
+        self.buffered_engine()
+        state = self.enter(move=-250, next_open=740)
+        self.assertEqual(state['pending']['trigger_price'], 720)
+        current = Bar(self.t+900, 740, 750, 720, 725)
+        state = self.engine.step([current], self.t+950)
+        self.assertEqual(state['position']['entry_price'], 720)
+        self.assertEqual(state['position']['side'], 'SELL')
+
+    def test_gap_fills_at_worse_open(self):
+        self.buffered_engine()
+        state = self.enter(next_open=1400)
+        self.assertEqual(state['position']['entry_price'], 1400)
+
+    def test_unfilled_entry_expires_and_checks_new_signal(self):
+        self.buffered_engine()
+        self.enter()
+        bar = Bar(self.t+900, 1250, 1260, 900, 950)
+        current = Bar(self.t+1800, 950, 950, 950, 950)
+        state = self.engine.step([bar, current], self.t+1802)
+        self.assertEqual(self.trades(), [])
+        self.assertEqual(state['pending']['side'], 'SELL')
+        self.assertEqual(state['pending']['trigger_price'], 870)
+        self.assertEqual(self.store.db.execute("SELECT count(*) FROM events WHERE kind='ENTRY_EXPIRED'").fetchone()[0], 1)
+
+    def test_pending_survives_restart_and_no_duplicate_fill(self):
+        self.buffered_engine()
+        self.enter()
+        restarted = PaperEngine(self.cfg, self.store)
+        current = Bar(self.t+900, 1250, 1300, 1240, 1290)
+        restarted.step([current], self.t+950)
+        restarted.step([current], self.t+952)
+        self.assertEqual(len(self.trades()), 1)
+
+    def test_long_opposite_stop_only_on_closed_500_body(self):
+        self.buffered_engine()
+        self.enter(next_open=1400)
+        bar = Bar(self.t+900, 1400, 1410, 850, 900)
+        state = self.engine.step([bar], self.t+1200)
+        self.assertIsNotNone(state['position'])
+        state = self.engine.step([bar], self.t+1802)
+        self.assertIsNone(state['position'])
+        self.assertEqual(self.trades()[0]['exit_reason'], 'opposite_candle_stop')
+        self.assertEqual(self.trades()[0]['exit_price'], 900)
+
+    def test_short_opposite_stop_only_on_closed_500_body(self):
+        self.buffered_engine()
+        self.enter(move=-250, next_open=700)
+        bar = Bar(self.t+900, 700, 1220, 680, 1200)
+        state = self.engine.step([bar], self.t+1802)
+        self.assertIsNone(state['position'])
+        self.assertEqual(self.trades()[0]['exit_reason'], 'opposite_candle_stop')
+
+    def test_adverse_wick_or_499_body_does_not_trigger_close_stop(self):
+        self.buffered_engine()
+        self.enter(next_open=1400)
+        bar = Bar(self.t+900, 1400, 1410, 500, 901)
+        state = self.engine.step([bar], self.t+1802)
+        self.assertIsNotNone(state['position'])
+
+    def test_target_precedes_close_only_stop(self):
+        self.buffered_engine()
+        self.enter(next_open=1400)
+        bar = Bar(self.t+900, 1400, 1650, 800, 900)
+        self.engine.step([bar], self.t+1802)
+        self.assertEqual(self.trades()[0]['exit_reason'], 'target')
+
+    def test_buffered_replay_waits_for_touch(self):
+        self.buffered_engine()
+        signal, _ = self.bars()
+        bar = Bar(self.t+900, 1250, 1500, 1240, 1450)
+        result = replay(self.cfg, self.store, [signal, bar])
+        self.assertEqual(result['target_hits'], 1)
+        self.assertEqual(self.trades()[0]['entry_price'], 1280)
+        self.assertEqual(self.trades()[0]['exit_price'], 1480)
 
 
 if __name__ == '__main__':

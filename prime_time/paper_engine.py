@@ -1,5 +1,6 @@
 """Deterministic momentum paper engine shared by polling and replay."""
 from datetime import datetime
+from .market_data import Bar
 from .paper_config import BAR_SECONDS
 from .session import IST
 
@@ -61,7 +62,10 @@ class PaperEngine:
             self._close(state, bar, position['target_price'], 'target', now)
         elif closed:
             bars_held = (bar.time - position['entry_time']) // BAR_SECONDS + 1
-            if bar.time + BAR_SECONDS >= position['deadline']:
+            if (self.cfg.opposite_candle_stop_points is not None and
+                    direction * (bar.close - bar.open) <= -self.cfg.opposite_candle_stop_points):
+                self._close(state, bar, bar.close, 'opposite_candle_stop', now, bar.time + BAR_SECONDS)
+            elif bar.time + BAR_SECONDS >= position['deadline']:
                 reason = 'cutoff' if position['deadline'] < position['entry_time'] + self.cfg.hold_candles*BAR_SECONDS else 'timeout'
                 self._close(state, bar, bar.close, reason, now, bar.time + BAR_SECONDS)
             else:
@@ -72,6 +76,41 @@ class PaperEngine:
                 self.store.event(now, 'HOLD', {'bar': bar.to_dict(), 'bars_held': bars_held},
                                  position['id'], message)
 
+    def _fill_pending(self, state, bar, now):
+        pending = state.get('pending')
+        if not pending or bar.time != pending['entry_time']:
+            return False
+        direction = pending['direction']
+        trigger = pending['trigger_price']
+        hit = bar.high >= trigger if direction == 1 else bar.low <= trigger
+        if not hit:
+            return False
+        # Stop-entry gaps fill at the worse opening price, never at a better stale trigger.
+        raw = max(trigger, bar.open) if direction == 1 else min(trigger, bar.open)
+        entry = raw + direction*self.cfg.slippage_points_per_side
+        deadline = bar.time + self.cfg.hold_candles*BAR_SECONDS
+        if self.cfg.force_flat_at_cutoff:
+            deadline = min(deadline, int(self.cfg.bounds(pending['signal_candle']['time'])[1].timestamp()))
+        position = dict(pending)
+        position.update(status='open', entry_observed_at=now, entry_price=entry,
+                        reference_next_open=bar.open, reference_fill_price=raw,
+                        entry_delay_seconds=now-bar.time,
+                        entry_timing='bar_open' if raw == bar.open else 'intrabar_touch_time_unknown',
+                        target_price=entry + direction*self.cfg.target_points,
+                        stop_price=None if self.cfg.stop_points is None else entry-direction*self.cfg.stop_points,
+                        deadline=deadline, quantity=self.cfg.quantity, config=self.cfg.to_dict())
+        state['position'], state['pending'] = position, None
+        self.store.trade(position)
+        signal = pending['signal_candle']
+        message = (f'PAPER ENTERED {self.cfg.symbol} {position["side"]}\n'
+                   f'Trade {position["id"]}\nTrigger {trigger:.2f} | Fill {entry:.2f} (includes slippage)\n'
+                   f'Target {position["target_price"]:.2f} | Opposite candle stop '
+                   f'{self.cfg.opposite_candle_stop_points} points at close\n'
+                   f'Entry candle {clock(bar.time)} | Observed {clock(now)}\n'
+                   f'Exit by {clock(deadline)}\nSignal closed candle:\n{candle_text(Bar(**signal))}')
+        self.store.event(now, 'ENTERED', dict(position), position['id'], message)
+        return True
+
     def step(self, bars, now):
         by_time = {bar.time: bar for bar in bars}
         if len(by_time) != len(bars):
@@ -79,7 +118,7 @@ class PaperEngine:
         with self.store.transaction():
             state = self.store.load_state()
             if state is None:
-                state = {'config': self.cfg.to_dict(), 'position': None,
+                state = {'config': self.cfg.to_dict(), 'position': None, 'pending': None,
                          'last_closed': int(now // BAR_SECONDS)*BAR_SECONDS - 2*BAR_SECONDS}
                 self.store.event(now, 'STARTED', {'config': self.cfg.to_dict()})
             elif state['config'] != self.cfg.to_dict():
@@ -89,8 +128,18 @@ class PaperEngine:
                            if state['last_closed'] < t and t + BAR_SECONDS + self.cfg.close_confirmation_seconds <= now]
             for bar in closed_bars:
                 # Never jump over missing data while a position is open.
-                if state['position'] and bar.time != state['last_closed'] + BAR_SECONDS:
+                if (state['position'] or state.get('pending')) and bar.time != state['last_closed'] + BAR_SECONDS:
                     raise DataGapError('Missing candle while managing paper position; waiting for complete history')
+                had_pending = state.get('pending') is not None
+                if had_pending:
+                    self._fill_pending(state, bar, now)
+                    if state.get('pending'):
+                        pending = state['pending']
+                        self.store.event(now, 'ENTRY_EXPIRED', dict(pending), pending['id'],
+                            f'PAPER ENTRY EXPIRED {self.cfg.symbol} {pending["side"]}\n'
+                            f'Trade setup {pending["id"]} | Trigger {pending["trigger_price"]:.2f}\n'
+                            f'No fill during the next candle:\n{candle_text(bar)}')
+                        state['pending'] = None
                 was_open = state['position'] is not None
                 if was_open:
                     self._manage(state, bar, now, closed=True)
@@ -108,6 +157,25 @@ class PaperEngine:
                                 decision = 'stale_signal_skipped'
                             elif self.cfg.force_flat_at_cutoff and entry_time >= self.cfg.bounds(bar.time)[1].timestamp():
                                 decision = 'cutoff_entry_skipped'
+                            elif self.cfg.entry_buffer_points is not None:
+                                direction = 1 if move > 0 else -1
+                                trigger = (bar.high + self.cfg.entry_buffer_points if direction == 1
+                                           else bar.low - self.cfg.entry_buffer_points)
+                                if trigger <= 0:
+                                    raise ValueError('Nonpositive SELL trigger; check instrument and buffer')
+                                pending = {
+                                    'id': f'{self.cfg.symbol}-{entry_time}', 'symbol': self.cfg.symbol,
+                                    'direction': direction, 'side': 'BUY' if direction == 1 else 'SELL',
+                                    'signal_candle': bar.to_dict(), 'signal_move': move,
+                                    'entry_time': entry_time, 'trigger_price': trigger,
+                                    'armed_at': now, 'expires_at': entry_time+BAR_SECONDS,
+                                }
+                                state['pending'] = pending
+                                self.store.event(now, 'ENTRY_ARMED', pending, pending['id'],
+                                    f'PAPER ENTRY ARMED {self.cfg.symbol} {pending["side"]}\n'
+                                    f'Trigger {trigger:.2f} | Valid until {clock(pending["expires_at"])}\n'
+                                    f'Signal closed candle:\n{candle_text(bar)}')
+                                decision = 'entry_armed'
                             elif next_bar is None:
                                 # Next-bar open is not available yet; retry until delay limit.
                                 break
@@ -144,7 +212,7 @@ class PaperEngine:
 
             # Targets are monitored throughout the developing candle, not only at close.
             current_time = int(now // BAR_SECONDS)*BAR_SECONDS
-            if state['position']:
+            if state['position'] or state.get('pending'):
                 expected = state['last_closed'] + BAR_SECONDS
                 if expected < current_time and expected not in by_time:
                     raise DataGapError('Candle history missing for open paper position')
@@ -152,6 +220,7 @@ class PaperEngine:
                 # It will be processed as a closed candle after confirmation.
                 current = by_time.get(current_time)
                 if current is not None and expected == current_time:
+                    self._fill_pending(state, current, now)
                     self._manage(state, current, now, closed=False)
             self.store.save_state(state)
         return self.store.load_state()

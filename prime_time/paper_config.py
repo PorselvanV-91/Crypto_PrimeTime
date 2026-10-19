@@ -17,6 +17,8 @@ class PaperConfig:
     movement_points: float = 200
     target_points: float = 200
     stop_points: float | None = None
+    opposite_candle_stop_points: float | None = 500
+    entry_buffer_points: float | None = 30
     hold_candles: int = 4
     start_new_york: str = '07:00'
     last_signal_candle_ist: str = '21:00'
@@ -28,7 +30,7 @@ class PaperConfig:
     poll_seconds: float = 2
     close_confirmation_seconds: float = 2
     max_entry_delay_seconds: float = 20
-    database: str = 'runtime/paper.sqlite3'
+    database: str = 'runtime/paper_v2.sqlite3'
 
     def __post_init__(self):
         for key in ('movement_points', 'target_points', 'quantity', 'poll_seconds',
@@ -42,6 +44,12 @@ class PaperConfig:
                 raise ValueError(f'{key} must be nonnegative and finite')
         if self.stop_points is not None and (not math.isfinite(self.stop_points) or self.stop_points <= 0):
             raise ValueError('stop_points must be null or positive and finite')
+        if self.opposite_candle_stop_points is not None and (
+                not math.isfinite(self.opposite_candle_stop_points) or self.opposite_candle_stop_points <= 0):
+            raise ValueError('opposite_candle_stop_points must be null or positive and finite')
+        if self.entry_buffer_points is not None and (
+                not math.isfinite(self.entry_buffer_points) or self.entry_buffer_points < 0):
+            raise ValueError('entry_buffer_points must be null or nonnegative and finite')
         if not isinstance(self.hold_candles, int) or not 1 <= self.hold_candles <= 96:
             raise ValueError('hold_candles must be between 1 and 96')
         for key in ('start_new_york', 'last_signal_candle_ist'):

@@ -77,7 +77,7 @@ def run_paper(config, once=False, env_file='.env'):
                         if state and state['config'] != config.to_dict():
                             raise ValueError('Configuration differs from persisted run; choose another database')
                         start = int(now // BAR_SECONDS)*BAR_SECONDS - 2*BAR_SECONDS
-                        if state and state['position']:
+                        if state and (state['position'] or state.get('pending')):
                             start = state['last_closed'] + BAR_SECONDS
                         # Cap below Delta's 2000-bar limit; catch up in successive polls.
                         end = min(int(now), start + 1000*BAR_SECONDS)
