@@ -1,0 +1,25 @@
+[Unit]
+Description=Prime Time BTC momentum paper trader
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=prime-time
+Group=prime-time
+WorkingDirectory=/opt/prime-time
+EnvironmentFile=/etc/prime-time.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/prime-time/.venv/bin/python -m prime_time paper --config /opt/prime-time/paper_config.json
+Restart=on-failure
+RestartSec=15
+TimeoutStopSec=30
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/prime-time/runtime
+
+[Install]
+WantedBy=multi-user.target

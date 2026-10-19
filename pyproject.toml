@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "prime-time-paper"
+version = "0.2.0"
+description = "Persistent 15-minute BTC momentum paper trading"
+requires-python = ">=3.11"
+dependencies = ["tzdata==2026.5"]
+
+[project.scripts]
+prime-time = "prime_time.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["prime_time*"]

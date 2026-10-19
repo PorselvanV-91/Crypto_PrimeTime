@@ -1,0 +1,19 @@
+{
+  "symbol": "BTCUSD",
+  "api_base_url": "https://api.india.delta.exchange",
+  "movement_points": 200,
+  "target_points": 200,
+  "stop_points": null,
+  "hold_candles": 4,
+  "start_new_york": "07:00",
+  "last_signal_candle_ist": "21:00",
+  "force_flat_at_cutoff": false,
+  "weekdays_only": false,
+  "quantity": 0.001,
+  "fee_bps_per_side": 5,
+  "slippage_points_per_side": 5,
+  "poll_seconds": 2,
+  "close_confirmation_seconds": 2,
+  "max_entry_delay_seconds": 20,
+  "database": "runtime/paper.sqlite3"
+}
