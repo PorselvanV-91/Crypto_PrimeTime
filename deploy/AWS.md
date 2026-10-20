@@ -4,7 +4,75 @@ The service only reads public Delta market data and sends Telegram messages.
 No exchange API key, inbound application port, or real order capability is needed.
 Allow outbound HTTPS and enable time synchronization on the server.
 
-## Git checkout and setup
+## tmux with your existing ~/botenv
+
+Use your normal SSH user; no new environment or service account is needed.
+
+```bash
+cd ~
+git clone https://github.com/PorselvanV-91/Crypto_PrimeTime.git
+cd ~/Crypto_PrimeTime
+source ~/botenv/bin/activate
+python --version  # Python 3.11 or newer
+python -m pip install -r requirements.txt
+python -m unittest discover -s tests -v
+```
+
+For an existing checkout, use `cd ~/Crypto_PrimeTime` then `git pull --ff-only`
+instead of cloning again. Copy private `config.py` into this directory,
+beside `paper_config.json`, containing:
+
+```python
+TELEGRAM_TOKEN = "your_bot_token"
+TELEGRAM_CHAT_ID = "your_chat_id"
+```
+
+Or copy `config.example.py` to `config.py` and edit it. Actual `config.py` is
+ignored by Git. `paper_config.json` contains strategy settings, separately.
+Nonempty environment variables (including values loaded from `.env`) override
+`config.py`; remove stale overrides if you want to use only your copied file.
+
+```bash
+chmod 600 config.py
+tmux new -s prime-time
+```
+
+Inside the new tmux session:
+
+```bash
+cd ~/Crypto_PrimeTime
+source ~/botenv/bin/activate
+python -m prime_time paper
+```
+
+Startup should say `Telegram enabled`. This confirms credentials were loaded,
+not that Telegram accepted a message. Alerts start with a qualifying setup;
+there is no startup message. Detach with **Ctrl+B**, release, then **D**.
+Disconnect SSH freely; reconnect with `tmux attach -t prime-time`.
+Use **Ctrl+C inside the session** to stop gracefully. tmux survives SSH
+disconnects, but does not restart the bot after a crash or server reboot.
+
+From another SSH terminal:
+
+```bash
+cd ~/Crypto_PrimeTime
+source ~/botenv/bin/activate
+python -m prime_time status
+python -m prime_time export
+tail -f runtime/paper.log
+```
+
+Exports appear in `reports/paper/trade_analysis.csv`. Do not run systemd and tmux
+against the same database simultaneously. To update, stop with Ctrl+C, run
+`git pull --ff-only` and `python -m pip install -r requirements.txt`, then start
+the runner again. Keep `runtime/` for recovery. Finish the old experiment before
+switching to the new strategy database.
+
+Only `config.py` needs manual copying for a fresh live paper instance. Historical
+CSV files and models are not needed. Copy a database only when intentionally
+migrating an experiment, after stopping the old runner.
+
+## Alternative: systemd checkout and setup
 
 Push this repository to your own Git remote, then use that remote URL below.
 Keep `.env`, `.venv`, `runtime`, `reports`, and historical data outside Git.

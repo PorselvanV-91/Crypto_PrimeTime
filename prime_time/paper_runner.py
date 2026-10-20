@@ -1,4 +1,4 @@
-"""Foreground polling service; systemd handles daemon lifecycle on AWS."""
+"""Foreground polling runner for tmux or systemd on AWS."""
 import logging
 import os
 import signal

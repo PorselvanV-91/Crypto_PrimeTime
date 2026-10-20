@@ -41,8 +41,10 @@ omit weekends. This evening window is independent of the US 09:30 stock open.
 ## Run locally (PowerShell)
 
 The local environment and private `.env` are already prepared. Telegram's helper
-was adapted from `Old/telegram_config.py`; the existing token/chat ID were copied
-into ignored `.env`, not Python source or Git.
+was adapted from `Old/telegram_config.py`. For AWS/tmux, manually copy private
+`config.py` beside `paper_config.json` with `TELEGRAM_TOKEN` and `TELEGRAM_CHAT_ID`.
+Use `config.example.py` as a template. Actual `config.py` and `.env` are ignored
+by Git. Nonempty environment/.env values take priority over `config.py`.
 
 ```powershell
 .\.venv\Scripts\python.exe -m prime_time paper
@@ -112,7 +114,7 @@ with that developing candle's snapshot.
 
 `runtime/paper_v2.sqlite3` saves positions, pending triggers, candles, events, trades and a Telegram
 outbox. Temporary delivery failures retry without losing trades. Credentials
-come from `.env` or environment variables (environment wins). Without credentials,
+come from environment variables, `.env`, or private `config.py` (in that order). Without credentials,
 alerts remain queued. Delivery is at least once: a crash after Telegram accepts
 a message but before recording success can duplicate an alert. Trade IDs are stable.
 
@@ -166,6 +168,7 @@ docs/             Earlier opening-range baseline notes
 paper_config.json Active momentum paper strategy configuration
 config.json       Earlier opening-range research configuration
 .env.example      Credential template; actual .env stays private
+config.example.py Private config.py template; actual config.py stays private
 runtime/          Database and rotating logs (ignored)
 data/             Historical CSV (ignored)
 reports/          Generated exports (ignored)
