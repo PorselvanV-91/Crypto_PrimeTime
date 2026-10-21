@@ -59,7 +59,7 @@ cd ~/Crypto_PrimeTime
 source ~/botenv/bin/activate
 python -m prime_time status
 python -m prime_time export
-tail -f runtime/paper.log
+tail -f runtime/paper_quote_v4.log
 ```
 
 Exports appear in `reports/paper/trade_analysis.csv`. Do not run systemd and tmux
@@ -71,6 +71,51 @@ switching to the new strategy database.
 Only `config.py` needs manual copying for a fresh live paper instance. Historical
 CSV files and models are not needed. Copy a database only when intentionally
 migrating an experiment, after stopping the old runner.
+
+## Quote mode and candle-touch comparison
+
+Default `python -m prime_time paper` now runs **QUOTE** mode with
+`paper_config.json` and a fresh `runtime/paper_quote_v4.sqlite3` database.
+Finish any existing v3 paper position before pulling/upgrading, then stop that
+runner with Ctrl+C, pull the code, and restart in the same tmux session.
+No additional packages, Telegram settings or exchange keys are required.
+
+An optional independent candle-touch comparison can run in a second tmux session:
+
+```bash
+tmux new -s prime-candle
+cd ~/Crypto_PrimeTime
+source ~/botenv/bin/activate
+python -m prime_time paper --config paper_candle_config.json
+```
+
+It uses `runtime/paper_candle_v4.sqlite3` and `runtime/paper_candle_v4.log`.
+Messages are labeled `[QUOTE]` or `[CANDLE_TOUCH]`. Do not run both modes against
+one database. Inspect/export the comparison independently:
+
+```bash
+python -m prime_time status --database runtime/paper_candle_v4.sqlite3
+python -m prime_time export --database runtime/paper_candle_v4.sqlite3 --output reports/candle
+```
+
+Quote mode buys at observed ask + slippage, sells at observed bid - slippage,
+and reverses sides to exit. It never executes from a candle-only touch. Stale,
+future, regressing, missing or slow quotes block execution. Timeouts/opposing
+candles request an exit, which waits for the next valid quote if the feed is
+unavailable. Candle endpoint failure does not prevent an exit on a fresh quote.
+Past unobserved target touches during downtime do not count as quote fills.
+
+`status` includes feed health. `feed_snapshots.csv` in exports records per-poll
+request/receipt times, HTTP/cache metadata, normalized quote exchange time,
+candle-opening time semantics, freshness validation and rejection reasons.
+Candle history has no last-update timestamp for its OHLC values; a fresh HTTP
+response is labeled `fresh_response_update_time_unknown`, not proof that the
+underlying candle values are current. Snapshot history grows with each poll.
+
+Keep the server clock synchronized. Default quote/response age limits are 10s,
+request latency 5s, future skew tolerance 2s. These are in both config files.
+OHLC-only replay requires `--config paper_candle_config.json`; quote fills need
+actual timestamped quote observations and cannot be reconstructed from OHLC.
 
 ## Alternative: systemd checkout and setup
 
@@ -113,11 +158,11 @@ sudo -u prime-time .venv/bin/python -m prime_time status
 sudo -u prime-time .venv/bin/python -m prime_time export --output runtime/export
 ```
 
-`runtime/paper_v3.sqlite3` is the source of truth for the updated strategy.
+`runtime/paper_quote_v4.sqlite3` is the source of truth for default quote mode.
 It contains the position, pending trigger, completed
 candles, decisions, entry/hold/exit events, trade records, and Telegram delivery
 status. CSV exports include `trade_analysis.csv`, with one row per trade.
-`runtime/paper.log` rotates at 5 MB with five backups; journald also captures logs.
+`runtime/paper_quote_v4.log` rotates at 5 MB with five backups; journald also captures logs.
 Protect and back up the database. For a consistent backup while running, use
 SQLite's backup facility, or stop the service before copying the database.
 Never delete the database to update code: that loses restart recovery state.
@@ -139,12 +184,12 @@ Systemd's default writable path requires any new database to remain under
 `/opt/prime-time/runtime/`. The updated `stop_points: 500` exits on an adverse
 500-point move from filled entry during the candle, alongside the existing
 opposing-body stop at candle closure. Protective stops and richer fill evidence
-use the fresh `paper_v3.sqlite3` database; finish the old experiment before
+use the fresh `paper_quote_v4.sqlite3` database; finish the old experiment before
 updating so its position is not left unmanaged. Inspect the old run with
-`python -m prime_time status --database runtime/paper_v2.sqlite3` before updating.
+`python -m prime_time status --database runtime/paper_v3.sqlite3` before updating.
 No dependency changes or extra credentials are needed. Quote evidence comes
-from a public ticker endpoint; failed quote requests are logged and candle-based
-stop monitoring continues. Export includes entry snapshots, quotes and fill
+from a public ticker endpoint; failed quote requests are logged and quote-mode
+execution waits for fresh data. Export includes entry snapshots, quotes and fill
 model evidence. Protective stops can fill worse during gaps or polling delays.
 
 Telegram is retried from the durable outbox after temporary failures. Delivery

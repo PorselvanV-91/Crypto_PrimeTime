@@ -25,6 +25,8 @@ def aggregate_csv(path, source_minutes=5):
 
 
 def replay(config, store, bars):
+    if config.execution_mode == 'quote':
+        raise ValueError('OHLC-only replay cannot reproduce quote fills; use --config paper_candle_config.json')
     if store.load_state() is not None:
         raise ValueError('Replay requires a new database; choose another --database path')
     engine = PaperEngine(config, store)
@@ -46,6 +48,7 @@ def replay(config, store, bars):
 def paper_summary(store):
     import json
     rows = [json.loads(r['data']) for r in store.db.execute('SELECT data FROM trades ORDER BY id')]
+    state = store.load_state()
     closed = [r for r in rows if r['status'] == 'closed']
     net = [r['net_points'] for r in closed]
     equity = peak = drawdown = 0
@@ -54,6 +57,8 @@ def paper_summary(store):
         peak = max(peak, equity)
         drawdown = max(drawdown, peak-equity)
     return {'closed_trades': len(closed), 'open_trades': len(rows)-len(closed),
+            'execution_mode': state['config'].get('execution_mode', 'legacy_candle_model') if state else None,
+            'execution_modes': sorted({r.get('execution_mode', 'legacy_candle_model') for r in rows}),
             'target_hits': sum(r['exit_reason'] == 'target' for r in closed),
             'net_win_rate': sum(x > 0 for x in net)/len(net) if net else 0,
             'net_points': sum(net), 'net_pnl_quote': sum(r['net_pnl_quote'] for r in closed),

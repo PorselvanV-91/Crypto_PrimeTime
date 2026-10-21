@@ -20,7 +20,8 @@ class ProtectiveStopTests(unittest.TestCase):
 
     def quote(self, now, bid=1399, ask=1401):
         return {'symbol': 'BTCUSD', 'bid': bid, 'ask': ask, 'spread_points': ask-bid,
-                'observed_at': now, 'source': 'test'}
+                'observed_at': now, 'exchange_timestamp': now, 'request_latency_seconds': 0,
+                'source': 'test'}
 
     def enter(self, short=False):
         signal = Bar(self.t, 1250, 1250, 1000, 1000) if short else Bar(self.t, 1000, 1250, 1000, 1250)

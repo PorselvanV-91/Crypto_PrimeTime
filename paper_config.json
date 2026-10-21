@@ -17,5 +17,10 @@
   "poll_seconds": 2,
   "close_confirmation_seconds": 2,
   "max_entry_delay_seconds": 20,
-  "database": "runtime/paper_v3.sqlite3"
+  "execution_mode": "quote",
+  "max_quote_age_seconds": 10,
+  "max_candle_response_age_seconds": 10,
+  "max_feed_latency_seconds": 5,
+  "clock_skew_tolerance_seconds": 2,
+  "database": "runtime/paper_quote_v4.sqlite3"
 }

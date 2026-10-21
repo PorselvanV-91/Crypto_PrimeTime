@@ -28,6 +28,9 @@ class Store:
                 event_id INTEGER PRIMARY KEY, message TEXT NOT NULL,
                 attempts INTEGER NOT NULL DEFAULT 0, next_attempt REAL NOT NULL DEFAULT 0,
                 sent_at REAL);
+            CREATE TABLE IF NOT EXISTS feed_snapshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, observed_at REAL NOT NULL,
+                execution_mode TEXT NOT NULL, data TEXT NOT NULL);
         ''')
 
     @contextmanager
@@ -61,6 +64,10 @@ class Store:
         self.db.execute('INSERT OR REPLACE INTO trades VALUES(?,?,?)',
                         (trade['id'], trade['status'], json.dumps(trade)))
 
+    def feed_snapshot(self, now, execution_mode, data):
+        self.db.execute('INSERT INTO feed_snapshots(observed_at,execution_mode,data) VALUES(?,?,?)',
+                        (now, execution_mode, json.dumps(data)))
+
     def flush_telegram(self, telegram, now, logger):
         if not telegram.enabled:
             return
@@ -81,7 +88,7 @@ class Store:
     def export(self, directory):
         directory = Path(directory)
         directory.mkdir(parents=True, exist_ok=True)
-        for table in ('trades', 'events', 'candles', 'outbox'):
+        for table in ('trades', 'events', 'candles', 'outbox', 'feed_snapshots'):
             rows = self.db.execute(f'SELECT * FROM {table}').fetchall()
             with (directory / f'{table}.csv').open('w', newline='', encoding='utf-8') as file:
                 keys = [r[1] for r in self.db.execute(f'PRAGMA table_info({table})')]

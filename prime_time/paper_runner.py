@@ -9,7 +9,7 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from .market_data import DeltaCandles
 from .paper_config import BAR_SECONDS
-from .paper_engine import PaperEngine
+from .paper_engine import create_engine
 from .paper_store import Store
 from .telegram import Telegram, load_env
 
@@ -50,7 +50,7 @@ def run_paper(config, once=False, env_file='.env'):
     formatter = logging.Formatter('%(asctime)sZ %(levelname)s %(message)s')
     formatter.converter = time.gmtime
     handlers = [logging.StreamHandler(), RotatingFileHandler(
-        log_directory / 'paper.log', maxBytes=5_000_000, backupCount=5, encoding='utf-8')]
+        log_directory / (Path(config.database).stem + '.log'), maxBytes=5_000_000, backupCount=5, encoding='utf-8')]
     for handler in handlers:
         handler.setFormatter(formatter)
         logger.addHandler(handler)
@@ -65,11 +65,12 @@ def run_paper(config, once=False, env_file='.env'):
                 saved = store.load_state()
                 if saved and saved['config'] != config.to_dict():
                     raise ValueError('Configuration differs from persisted run; choose another database')
-                engine = PaperEngine(config, store)
+                engine = create_engine(config, store)
                 feed = DeltaCandles(config)
-                logger.info('Paper service started: %s; Telegram %s', config.symbol,
+                logger.info('Paper service started: %s [%s]; Telegram %s', config.symbol, config.execution_mode,
                             'enabled' if telegram.enabled else 'disabled (outbox retained)')
                 failures = 0
+                last_health = None
                 while not stopped.is_set():
                     try:
                         now = time.time()
@@ -81,16 +82,26 @@ def run_paper(config, once=False, env_file='.env'):
                             start = state['last_closed'] + BAR_SECONDS
                         # Cap below Delta's 2000-bar limit; catch up in successive polls.
                         end = min(int(now), start + 1000*BAR_SECONDS)
-                        bars = feed.fetch(start, end)
-                        if not bars:
-                            raise RuntimeError('No candle data returned')
+                        try:
+                            bars = feed.fetch(start, end)
+                            if not bars:
+                                raise RuntimeError('No candle data returned')
+                        except Exception:
+                            if config.execution_mode != 'quote':
+                                raise
+                            bars = []
+                            logger.warning('Candle feed unavailable; only fresh quote exits can execute')
                         quote_snapshot = None
                         try:
                             quote_snapshot = feed.fetch_quote()
                         except Exception as error:
-                            # Keep candle-based protective management running if quote audit is unavailable.
-                            logger.warning('Quote audit unavailable (%s); using candle model', type(error).__name__)
-                        engine.step(bars, time.time(), quote_snapshot=quote_snapshot, mode='live')
+                            logger.warning('Quote unavailable (%s); execution mode remains %s', type(error).__name__, config.execution_mode)
+                        new_state = engine.step(bars, time.time(), quote_snapshot=quote_snapshot, mode='live',
+                                                candle_evidence=feed.last_candle_evidence)
+                        health = new_state.get('feed_health')
+                        if health != last_health:
+                            logger.info('Feed validation: %s', health)
+                            last_health = health
                         failures = 0
                     except (ValueError, RuntimeError) as error:
                         # These messages are application controlled; no credential URLs.

@@ -30,15 +30,21 @@ class PaperConfig:
     poll_seconds: float = 2
     close_confirmation_seconds: float = 2
     max_entry_delay_seconds: float = 20
-    database: str = 'runtime/paper_v3.sqlite3'
+    execution_mode: str = 'candle_touch'
+    max_quote_age_seconds: float = 10
+    max_candle_response_age_seconds: float = 10
+    max_feed_latency_seconds: float = 5
+    clock_skew_tolerance_seconds: float = 2
+    database: str = 'runtime/paper_candle_v4.sqlite3'
 
     def __post_init__(self):
         for key in ('movement_points', 'target_points', 'quantity', 'poll_seconds',
-                    'max_entry_delay_seconds'):
+                    'max_entry_delay_seconds', 'max_quote_age_seconds',
+                    'max_candle_response_age_seconds', 'max_feed_latency_seconds'):
             value = getattr(self, key)
             if not math.isfinite(value) or value <= 0:
                 raise ValueError(f'{key} must be positive and finite')
-        for key in ('fee_bps_per_side', 'slippage_points_per_side', 'close_confirmation_seconds'):
+        for key in ('fee_bps_per_side', 'slippage_points_per_side', 'close_confirmation_seconds', 'clock_skew_tolerance_seconds'):
             value = getattr(self, key)
             if not math.isfinite(value) or value < 0:
                 raise ValueError(f'{key} must be nonnegative and finite')
@@ -60,6 +66,10 @@ class PaperConfig:
             raise ValueError('Require confirmation < max entry delay < 900 seconds')
         if not self.api_base_url.startswith('https://') or not self.symbol or not self.database:
             raise ValueError('Require HTTPS API URL, symbol and database path')
+        if self.execution_mode not in ('quote', 'candle_touch'):
+            raise ValueError('execution_mode must be quote or candle_touch')
+        if self.execution_mode == 'quote' and self.entry_buffer_points is None:
+            raise ValueError('Quote mode requires a buffered entry trigger')
 
     def to_dict(self):
         return asdict(self)
