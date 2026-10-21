@@ -17,7 +17,10 @@ This application cannot submit exchange orders.
    An unfilled trigger expires at that candle's close, and that closed candle
    can generate a new signal. Gaps beyond a trigger fill at the worse opening
    price. Adverse slippage is added. One pending entry or position at a time.
-4. Target **200 price points from the modeled fill**. Exit a BUY if a completed
+4. Target **200 price points from the modeled fill**. A separate **500-point
+   protective price stop** is checked on every poll: BUY stop = filled entry −500;
+   SELL stop = filled entry +500. It does not wait for candle closure. The
+   additional opposing-candle exit remains: exit a BUY if a completed
    candle's close minus open is **−500 points or less**; exit a SELL if it is
    **+500 points or more**. This stop uses the candle body, not a wick or cumulative
    loss from entry. Model the exit at that close with adverse slippage. A target
@@ -33,7 +36,7 @@ at 100,250. Arm BUY at 100,330 for the 17:45–18:00 candle. If price touches it
 default slippage models entry at 100,335 and target at 100,535. If it gaps open
 at 100,400, entry instead models 100,405. If no trigger touch occurs before
 18:00, no trade opens. A filled trade exits by 18:45 if neither target nor
-the opposite-body stop occurs first; the partially held entry candle counts as one.
+either stop occurs first; the partially held entry candle counts as one.
 
 Crypto weekends and US holidays are included by default. `weekdays_only` can
 omit weekends. This evening window is independent of the US 09:30 stock open.
@@ -93,7 +96,23 @@ Targets use developing candle high/low. Exact touch times are unknown; exit
 observation time records when polling discovered the touch. The exit alert
 labels a developing candle snapshot; holding/timeout alerts contain closed
 candle values. Replay discovers targets at candle closure, so it cannot model
-live intrabar latency. Optional stops assume stop first if both levels are hit.
+live intrabar latency. If candle data shows both protective stop and target,
+assume stop first and record the ambiguity. A pre-entry wick in a developing
+entry candle is excluded from the live protective-stop test unless a later
+new extreme or observed price confirms a stop crossing. Historical replay
+cannot reconstruct that sequence and labels conservative entry/stop ambiguity.
+
+Every live poll also requests the public Delta bid/ask ticker for audit evidence.
+Entry records include `entry_candle_snapshot`, `entry_audit` (receipt time, quote
+status, bid/ask, spread, request latency and raw exchange timestamp), fill model,
+slippage, and the signed difference between the modeled fill and observed ask
+for BUY or bid for SELL. Positive difference means a worse modeled fill. Quotes
+are contextual evidence: entries remain modeled trigger/open plus slippage,
+not actual exchange executions. Quote and candle requests are separate snapshots.
+Only matching current-candle quotes received within ten seconds are attached;
+exchange timestamps are preserved raw and are not a guarantee of feed freshness.
+Missing/failed quotes are explicit and do not disable candle-based stop management.
+Historical recovery/replay never attaches today's quote to an old fill.
 
 Existing positions recover using intervening candle history, including target
 hits during downtime. Missing bars while holding pause processing rather than
@@ -101,8 +120,11 @@ guessing an exit; errors appear in the service log. Historical candle timestamps
 and the recovery observation timestamp are stored separately.
 
 Funding, dynamic spreads, order books, liquidation and margin are not modeled.
-The new stop waits for a qualifying candle close; it does not cap losses at 500
-points from entry. The optional fixed price stop (`stop_points`) remains disabled.
+The opposing-body stop waits for closure, while `stop_points: 500` supplies an
+independent protective exit during the candle. It is a paper price trigger, not
+a guaranteed 500-point loss cap: gaps, polling delays, slippage and fees can
+increase losses. Current bid (long exits) or ask (short exits) is used when worse
+than the protective trigger; later candle opening gaps also fill adversely.
 
 ## Telegram and logs
 
@@ -112,7 +134,7 @@ and exit reason/net result when closed. Every scanned closed candle and decision
 is logged. A target hit during a candle produces an immediate polling alert
 with that developing candle's snapshot.
 
-`runtime/paper_v2.sqlite3` saves positions, pending triggers, candles, events, trades and a Telegram
+`runtime/paper_v3.sqlite3` saves positions, pending triggers, candles, events, trades and a Telegram
 outbox. Temporary delivery failures retry without losing trades. Credentials
 come from environment variables, `.env`, or private `config.py` (in that order). Without credentials,
 alerts remain queued. Delivery is at least once: a crash after Telegram accepts
@@ -147,16 +169,22 @@ at the modeled 0.001 BTC quantity). High target-hit frequency did not offset
 large timed-exit losses and costs. This is a paper research experiment, not
 evidence of a profitable strategy.
 
-The updated defaults use a fresh `runtime/paper_v2.sqlite3` database. Finish the
+The protective-stop defaults use a fresh `runtime/paper_v3.sqlite3` database. Finish the
 old experiment before starting the new one; its database remains available for
-analysis with `status --database runtime/paper.sqlite3`. To reproduce the earlier
+analysis with `status --database runtime/paper_v2.sqlite3`. To reproduce the earlier
 entry behavior, use `entry_buffer_points: null` and
-`opposite_candle_stop_points: null` in a separate experiment configuration.
+`opposite_candle_stop_points: null` and `stop_points: null` in a separate experiment configuration.
 
-With the updated buffered entry and opposite-body stop, the same historical
+With buffered entry and opposite-body stop, before the protective-stop update, the same historical
 proxy data produced **376 trades, 269 target hits, 71.54% net win rate, and
 −33,877.80 net points** (−33.8778 USD at 0.001 BTC). This is still negative
 after the configured costs; it is not an independently validated trading edge.
+
+With the additional 500-point protective price stop, the same coarse historical
+replay produced **393 trades, 241 target hits, and −56,282.18 net points**.
+The conservative stop-first rule cannot reconstruct intrabar ordering; this
+result is not evidence that the new stop improves profitability. Live quote
+and entry snapshots provide evidence for evaluating fills in the next paper run.
 
 ## Source and AWS
 

@@ -39,7 +39,7 @@ def replay(config, store, bars):
         else:
             # No available next-open fill; don't invent an entry at end of data.
             now += config.max_entry_delay_seconds
-        engine.step(snapshot, now)
+        engine.step(snapshot, now, mode='replay')
     return paper_summary(store)
 
 

@@ -22,6 +22,27 @@ class DataGapError(RuntimeError):
 class PaperEngine:
     def __init__(self, config, store):
         self.cfg, self.store = config, store
+        self._quote = None
+        self._mode = 'candle_model'
+
+    def _quote_for(self, bar, now):
+        snapshot = self._quote
+        if (self._mode == 'live' and snapshot and
+                bar.time == int(now // BAR_SECONDS)*BAR_SECONDS and
+                0 <= now-snapshot['observed_at'] <= 10):
+            return snapshot
+        return None
+
+    def _audit(self, bar, now):
+        snapshot = self._quote_for(bar, now)
+        if self._mode != 'live':
+            status = 'not_collected_' + self._mode
+        elif bar.time + BAR_SECONDS <= now:
+            status = 'historical_candle_no_matching_quote'
+        else:
+            status = 'available' if snapshot else 'missing_or_stale'
+        return {'candle_snapshot': bar.to_dict(), 'snapshot_observed_at': now,
+                'quote': snapshot, 'quote_status': status, 'execution_origin': self._mode}
 
     def _close(self, state, bar, raw_exit, reason, now, exact_time=None):
         position = state['position']
@@ -35,11 +56,17 @@ class PaperEngine:
                         gross_points=gross, fee_points=fees, net_points=gross-fees,
                         net_pnl_quote=(gross-fees)*position['quantity'],
                         exit_candle=bar.to_dict())
+        audit = self._audit(bar, now)
+        position.update(exit_audit=audit, exit_reference_price=raw_exit,
+                        exit_slippage_points=self.cfg.slippage_points_per_side,
+                        exit_bid=audit['quote']['bid'] if audit['quote'] else None,
+                        exit_ask=audit['quote']['ask'] if audit['quote'] else None)
         self.store.trade(position)
         message = (f'PAPER CLOSED {self.cfg.symbol} {position["side"]}\n'
                    f'Trade {position["id"]}\n{reason.upper()} | '
                    f'Entry {position["entry_price"]:.2f} → Exit {exit_price:.2f}\n'
-                   f'Net {gross-fees:+.2f} points | '
+                   f'Gross {gross:+.2f} | Fees {fees:.2f} | Net {gross-fees:+.2f} points\n'
+                   f'Exit quote {audit["quote_status"]} | Bid/ask {position["exit_bid"]}/{position["exit_ask"]}\n'
                    f'P&L {position["net_pnl_quote"]:+.4f} USD at {position["quantity"]:g} BTC\n'
                    f'Observed {clock(now)}\n'
                    f'{"Closed candle" if bar.time + BAR_SECONDS <= now else "Developing candle (target/stop observed)"}:\n'
@@ -54,10 +81,34 @@ class PaperEngine:
         direction = position['direction']
         stop = position['stop_price']
         stop_hit = stop is not None and (bar.low <= stop if direction == 1 else bar.high >= stop)
+        quote_snapshot = self._quote_for(bar, now)
+        observed_exit = (quote_snapshot['bid'] if direction == 1 else quote_snapshot['ask']) if quote_snapshot else None
+        # A wick seen before an intrabar entry is not a post-entry stop hit.
+        baseline = position.get('entry_candle_snapshot')
+        if (stop is not None and baseline and position.get('entry_execution_origin') == 'live' and
+                position.get('entry_timing') == 'intrabar_touch_time_unknown' and
+                bar.time == position['entry_time']):
+            new_extreme = bar.low < baseline['low'] if direction == 1 else bar.high > baseline['high']
+            close_beyond = bar.close <= stop if direction == 1 else bar.close >= stop
+            stop_hit = (new_extreme and stop_hit) or close_beyond
+        if stop is not None and observed_exit is not None:
+            stop_hit = stop_hit or (observed_exit <= stop if direction == 1 else observed_exit >= stop)
         target_hit = bar.high >= position['target_price'] if direction == 1 else bar.low <= position['target_price']
         if stop_hit:
-            raw = min(stop, bar.open) if direction == 1 else max(stop, bar.open)
-            self._close(state, bar, raw, 'stop', now)
+            raw = stop
+            if bar.time > position['entry_time'] or position.get('entry_timing') == 'bar_open':
+                raw = min(raw, bar.open) if direction == 1 else max(raw, bar.open)
+            if observed_exit is not None:
+                raw = min(raw, observed_exit) if direction == 1 else max(raw, observed_exit)
+            elif self._mode == 'live' and not closed:
+                raw = min(raw, bar.close) if direction == 1 else max(raw, bar.close)
+            position['exit_both_levels_in_candle'] = bool(target_hit)
+            position['exit_ordering_assumption'] = 'stop_first_ohlc_order_unknown' if target_hit else None
+            if (not target_hit and bar.time == position['entry_time'] and
+                    position.get('entry_timing') == 'intrabar_touch_time_unknown' and
+                    position.get('entry_execution_origin') != 'live'):
+                position['exit_ordering_assumption'] = 'entry_and_stop_order_unknown_conservative_stop'
+            self._close(state, bar, raw, 'protective_stop', now)
         elif target_hit:
             self._close(state, bar, position['target_price'], 'target', now)
         elif closed:
@@ -99,19 +150,39 @@ class PaperEngine:
                         target_price=entry + direction*self.cfg.target_points,
                         stop_price=None if self.cfg.stop_points is None else entry-direction*self.cfg.stop_points,
                         deadline=deadline, quantity=self.cfg.quantity, config=self.cfg.to_dict())
+        audit = self._audit(bar, now)
+        snapshot = audit['quote']
+        side_quote = (snapshot['ask'] if direction == 1 else snapshot['bid']) if snapshot else None
+        position.update(entry_candle_snapshot=bar.to_dict(), entry_audit=audit,
+                        entry_execution_origin='historical_recovery' if self._mode == 'live' and bar.time+BAR_SECONDS <= now else self._mode,
+                        entry_fill_model='gap_open_plus_slippage' if raw == bar.open else 'trigger_plus_slippage',
+                        entry_slippage_points=self.cfg.slippage_points_per_side,
+                        entry_bid=snapshot['bid'] if snapshot else None,
+                        entry_ask=snapshot['ask'] if snapshot else None,
+                        entry_spread_points=snapshot['spread_points'] if snapshot else None,
+                        entry_vs_observed_side_points=direction*(entry-side_quote) if side_quote is not None else None)
         state['position'], state['pending'] = position, None
         self.store.trade(position)
         signal = pending['signal_candle']
         message = (f'PAPER ENTERED {self.cfg.symbol} {position["side"]}\n'
                    f'Trade {position["id"]}\nTrigger {trigger:.2f} | Fill {entry:.2f} (includes slippage)\n'
-                   f'Target {position["target_price"]:.2f} | Opposite candle stop '
+                   f'Target {position["target_price"]:.2f} | Protective stop {position["stop_price"]}\n'
+                   f'Fill model {position["entry_fill_model"]} | Quote {audit["quote_status"]}\n'
+                   f'Observed bid/ask {position["entry_bid"]}/{position["entry_ask"]}\n'
+                   f'Spread {position["entry_spread_points"]} | Fill vs observed side '
+                   f'{position["entry_vs_observed_side_points"]} points\n'
+                   f'Opposite candle stop '
                    f'{self.cfg.opposite_candle_stop_points} points at close\n'
                    f'Entry candle {clock(bar.time)} | Observed {clock(now)}\n'
-                   f'Exit by {clock(deadline)}\nSignal closed candle:\n{candle_text(Bar(**signal))}')
+                   f'Exit by {clock(deadline)}\nEntry observation candle snapshot:\n{candle_text(bar)}\n'
+                   f'Signal closed candle:\n{candle_text(Bar(**signal))}')
         self.store.event(now, 'ENTERED', dict(position), position['id'], message)
         return True
 
-    def step(self, bars, now):
+    def step(self, bars, now, quote_snapshot=None, mode='candle_model'):
+        if mode not in ('live', 'replay', 'candle_model'):
+            raise ValueError('Unknown execution evidence mode')
+        self._quote, self._mode = quote_snapshot, mode
         by_time = {bar.time: bar for bar in bars}
         if len(by_time) != len(bars):
             raise ValueError('Duplicate bars passed to engine')
@@ -197,6 +268,14 @@ class PaperEngine:
                                     'deadline': deadline, 'quantity': self.cfg.quantity,
                                     'config': self.cfg.to_dict(),
                                 }
+                                audit = self._audit(next_bar, now)
+                                position.update(entry_audit=audit, entry_candle_snapshot=next_bar.to_dict(),
+                                                entry_execution_origin=self._mode, entry_timing='bar_open',
+                                                entry_fill_model='next_open_plus_slippage',
+                                                entry_slippage_points=self.cfg.slippage_points_per_side,
+                                                entry_bid=audit['quote']['bid'] if audit['quote'] else None,
+                                                entry_ask=audit['quote']['ask'] if audit['quote'] else None,
+                                                entry_spread_points=audit['quote']['spread_points'] if audit['quote'] else None)
                                 state['position'] = position
                                 self.store.trade(position)
                                 message = (f'PAPER ENTERED {self.cfg.symbol} {position["side"]}\n'

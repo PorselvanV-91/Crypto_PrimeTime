@@ -3,7 +3,7 @@
   "api_base_url": "https://api.india.delta.exchange",
   "movement_points": 200,
   "target_points": 200,
-  "stop_points": null,
+  "stop_points": 500,
   "opposite_candle_stop_points": 500,
   "entry_buffer_points": 30,
   "hold_candles": 4,
@@ -17,5 +17,5 @@
   "poll_seconds": 2,
   "close_confirmation_seconds": 2,
   "max_entry_delay_seconds": 20,
-  "database": "runtime/paper_v2.sqlite3"
+  "database": "runtime/paper_v3.sqlite3"
 }

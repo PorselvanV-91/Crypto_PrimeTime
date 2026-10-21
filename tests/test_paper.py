@@ -51,7 +51,7 @@ class EngineTests(unittest.TestCase):
         self.store = Store(':memory:')
         self.addCleanup(self.store.close)
         self.cfg = PaperConfig(fee_bps_per_side=0, slippage_points_per_side=0,
-                               entry_buffer_points=None, opposite_candle_stop_points=None)
+                               entry_buffer_points=None, opposite_candle_stop_points=None, stop_points=None)
         self.engine = PaperEngine(self.cfg, self.store)
         self.t = timestamp('2026-10-19T16:30')
 
@@ -198,7 +198,7 @@ class BufferedEntryTests(unittest.TestCase):
     trades = EngineTests.trades
 
     def buffered_engine(self):
-        self.cfg = PaperConfig(fee_bps_per_side=0, slippage_points_per_side=0)
+        self.cfg = PaperConfig(fee_bps_per_side=0, slippage_points_per_side=0, stop_points=None)
         self.engine = PaperEngine(self.cfg, self.store)
         return self.engine
 

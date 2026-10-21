@@ -113,7 +113,7 @@ sudo -u prime-time .venv/bin/python -m prime_time status
 sudo -u prime-time .venv/bin/python -m prime_time export --output runtime/export
 ```
 
-`runtime/paper_v2.sqlite3` is the source of truth for the updated strategy.
+`runtime/paper_v3.sqlite3` is the source of truth for the updated strategy.
 It contains the position, pending trigger, completed
 candles, decisions, entry/hold/exit events, trade records, and Telegram delivery
 status. CSV exports include `trade_analysis.csv`, with one row per trade.
@@ -136,11 +136,16 @@ Configuration is saved in the database. Changing strategy settings requires a
 new database path in `paper_config.json`, so experiments cannot silently mix.
 Finish the existing paper position before switching to another database.
 Systemd's default writable path requires any new database to remain under
-`/opt/prime-time/runtime/`. Set `stop_points` to a positive value only if you
-explicitly want to add a fixed-price stop as a separate experiment. The updated
-defaults already exit on an opposing 500-point candle body at candle closure.
-Buffered entry and that close-based stop use the fresh `paper_v2.sqlite3` database;
-finish the old experiment before updating so its position is not left unmanaged.
+`/opt/prime-time/runtime/`. The updated `stop_points: 500` exits on an adverse
+500-point move from filled entry during the candle, alongside the existing
+opposing-body stop at candle closure. Protective stops and richer fill evidence
+use the fresh `paper_v3.sqlite3` database; finish the old experiment before
+updating so its position is not left unmanaged. Inspect the old run with
+`python -m prime_time status --database runtime/paper_v2.sqlite3` before updating.
+No dependency changes or extra credentials are needed. Quote evidence comes
+from a public ticker endpoint; failed quote requests are logged and candle-based
+stop monitoring continues. Export includes entry snapshots, quotes and fill
+model evidence. Protective stops can fill worse during gaps or polling delays.
 
 Telegram is retried from the durable outbox after temporary failures. Delivery
 is at least once: a crash between Telegram accepting a message and the database

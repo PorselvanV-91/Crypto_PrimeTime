@@ -16,7 +16,7 @@ class PaperConfig:
     api_base_url: str = 'https://api.india.delta.exchange'
     movement_points: float = 200
     target_points: float = 200
-    stop_points: float | None = None
+    stop_points: float | None = 500
     opposite_candle_stop_points: float | None = 500
     entry_buffer_points: float | None = 30
     hold_candles: int = 4
@@ -30,7 +30,7 @@ class PaperConfig:
     poll_seconds: float = 2
     close_confirmation_seconds: float = 2
     max_entry_delay_seconds: float = 20
-    database: str = 'runtime/paper_v2.sqlite3'
+    database: str = 'runtime/paper_v3.sqlite3'
 
     def __post_init__(self):
         for key in ('movement_points', 'target_points', 'quantity', 'poll_seconds',

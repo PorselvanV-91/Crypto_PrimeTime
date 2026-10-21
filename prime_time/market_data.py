@@ -1,8 +1,9 @@
 """Unauthenticated Delta India candles. This module has no order endpoints."""
 import json
 import math
+import time
 from dataclasses import asdict, dataclass
-from urllib.parse import urlencode
+from urllib.parse import urlencode, quote
 from urllib.request import Request, urlopen
 from .paper_config import BAR_SECONDS
 
@@ -31,6 +32,27 @@ class Bar:
 class DeltaCandles:
     def __init__(self, config):
         self.config = config
+
+    def fetch_quote(self):
+        started = time.time()
+        request = Request(self.config.api_base_url.rstrip('/') + '/v2/tickers/' + quote(self.config.symbol, safe=''),
+                          headers={'Accept': 'application/json', 'User-Agent': 'prime-time-paper/0.3'})
+        with urlopen(request, timeout=5) as response:
+            data = json.load(response)
+        received = time.time()
+        if data.get('success') is not True or not isinstance(data.get('result'), dict):
+            raise ValueError('Delta quote request failed')
+        ticker = data['result']
+        if ticker.get('symbol') != self.config.symbol:
+            raise ValueError('Delta quote symbol mismatch')
+        prices = ticker.get('quotes') or {}
+        bid, ask = float(prices['best_bid']), float(prices['best_ask'])
+        if not all(math.isfinite(x) and x > 0 for x in (bid, ask)) or bid > ask:
+            raise ValueError('Invalid bid/ask quote')
+        return {'symbol': self.config.symbol, 'bid': bid, 'ask': ask, 'spread_points': ask-bid,
+                'observed_at': received, 'request_started_at': started,
+                'request_latency_seconds': received-started,
+                'exchange_timestamp_raw': ticker.get('timestamp'), 'source': 'delta_rest_ticker'}
 
     def fetch(self, start, end):
         query = urlencode(dict(symbol=self.config.symbol, resolution='15m',

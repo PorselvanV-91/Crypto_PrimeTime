@@ -84,7 +84,13 @@ def run_paper(config, once=False, env_file='.env'):
                         bars = feed.fetch(start, end)
                         if not bars:
                             raise RuntimeError('No candle data returned')
-                        engine.step(bars, time.time())
+                        quote_snapshot = None
+                        try:
+                            quote_snapshot = feed.fetch_quote()
+                        except Exception as error:
+                            # Keep candle-based protective management running if quote audit is unavailable.
+                            logger.warning('Quote audit unavailable (%s); using candle model', type(error).__name__)
+                        engine.step(bars, time.time(), quote_snapshot=quote_snapshot, mode='live')
                         failures = 0
                     except (ValueError, RuntimeError) as error:
                         # These messages are application controlled; no credential URLs.
