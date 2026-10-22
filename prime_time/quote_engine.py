@@ -1,7 +1,7 @@
 """Observed executable quote fills; never infer executions from candle extremes."""
 from .market_data import Bar
 from .paper_config import BAR_SECONDS
-from .paper_engine import PaperEngine, clock, candle_text
+from .paper_engine import PaperEngine, candle_text
 
 
 class QuotePaperEngine(PaperEngine):
@@ -77,7 +77,7 @@ class QuotePaperEngine(PaperEngine):
             elif not position.get('requested_exit'):
                 held = (bar.time-position['entry_time'])//BAR_SECONDS+1
                 self.store.event(now, 'HOLD', {'bar': bar.to_dict(), 'bars_held': held}, position['id'],
-                    f'PAPER HOLD [QUOTE] {self.cfg.symbol} {position["side"]}\n'
+                    f'PAPER HOLD [{self.cfg.alert_label}] {self.cfg.symbol} {position["side"]}\n'
                     f'Trade {position["id"]} | Candle {held}/{self.cfg.hold_candles}\n'
                     f'Entry {position["entry_price"]:.2f} | Target {position["target_price"]:.2f}\n'
                     f'Protective stop {position["stop_price"]}\nClosed candle:\n{candle_text(bar)}')
@@ -86,10 +86,7 @@ class QuotePaperEngine(PaperEngine):
     def _after_bars(self, state, now):
         pending = state.get('pending')
         if pending and now >= pending['expires_at']:
-            self.store.event(now, 'ENTRY_EXPIRED', dict(pending), pending['id'],
-                f'PAPER ENTRY EXPIRED [QUOTE] {self.cfg.symbol} {pending["side"]}\n'
-                f'Trade setup {pending["id"]} | No fresh executable trigger observed by {clock(pending["expires_at"])}')
-            state['pending'] = None
+            self._expire_pending(state, now)
         self._exit_on_quote(state, now)
 
     def step(self, bars, now, quote_snapshot=None, mode='live', candle_evidence=None):

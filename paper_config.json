@@ -22,5 +22,9 @@
   "max_candle_response_age_seconds": 10,
   "max_feed_latency_seconds": 5,
   "clock_skew_tolerance_seconds": 2,
-  "database": "runtime/paper_quote_v4.sqlite3"
+  "database": "runtime/paper_quote_v4.sqlite3",
+  "strategy_name": "baseline",
+  "trend_filter": "off",
+  "vwap_session_timezone": "UTC",
+  "relative_volume_period": 20
 }

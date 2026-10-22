@@ -4,6 +4,7 @@ from .market_data import Bar
 from .paper_config import BAR_SECONDS
 from .session import IST
 from .feed_quality import quote_quality, candle_quality
+from .signal_context import signal_context, context_text
 
 
 def clock(timestamp):
@@ -59,6 +60,18 @@ class PaperEngine:
     def _after_bars(self, state, now):
         pass
 
+    def _expire_pending(self, state, now, bar=None):
+        pending = state.get('pending')
+        if not pending:
+            return
+        explanation = (f'no fresh executable trigger observed by {clock(pending["expires_at"])}'
+                       if self.cfg.execution_mode == 'quote' else 'No fill during the next candle')
+        details = f'\nClosed candle snapshot:\n{candle_text(bar)}' if bar else ''
+        self.store.event(now, 'ENTRY_EXPIRED', dict(pending), pending['id'],
+            f'PAPER ENTRY EXPIRED [{self.cfg.alert_label}] {self.cfg.symbol} {pending["side"]}\n'
+            f'Trade setup {pending["id"]} | Trigger {pending["trigger_price"]:.2f}\n{explanation}{details}')
+        state['pending'] = None
+
     def _entry_reference(self, pending, bar, now):
         direction, trigger = pending['direction'], pending['trigger_price']
         hit = bar.high >= trigger if direction == 1 else bar.low <= trigger
@@ -85,7 +98,7 @@ class PaperEngine:
                         exit_ask=audit['quote']['ask'] if audit['quote'] else None)
         position['execution_mode'] = self.cfg.execution_mode
         self.store.trade(position)
-        message = (f'PAPER CLOSED [{self.cfg.execution_mode.upper()}] {self.cfg.symbol} {position["side"]}\n'
+        message = (f'PAPER CLOSED [{self.cfg.alert_label}] {self.cfg.symbol} {position["side"]}\n'
                    f'Trade {position["id"]}\n{reason.upper()} | '
                    f'Entry {position["entry_price"]:.2f} → Exit {exit_price:.2f}\n'
                    f'Gross {gross:+.2f} | Fees {fees:.2f} | Net {gross-fees:+.2f} points\n'
@@ -146,7 +159,7 @@ class PaperEngine:
                 reason = 'cutoff' if position['deadline'] < position['entry_time'] + self.cfg.hold_candles*BAR_SECONDS else 'timeout'
                 self._close(state, bar, bar.close, reason, now, bar.time + BAR_SECONDS)
             else:
-                message = (f'PAPER HOLD [{self.cfg.execution_mode.upper()}] {self.cfg.symbol} {position["side"]}\n'
+                message = (f'PAPER HOLD [{self.cfg.alert_label}] {self.cfg.symbol} {position["side"]}\n'
                            f'Trade {position["id"]} | Candle {bars_held}/{self.cfg.hold_candles}\n'
                            f'Entry {position["entry_price"]:.2f} | Target {position["target_price"]:.2f}\n'
                            f'Closed candle:\n{candle_text(bar)}')
@@ -194,7 +207,8 @@ class PaperEngine:
         state['position'], state['pending'] = position, None
         self.store.trade(position)
         signal = pending['signal_candle']
-        message = (f'PAPER ENTERED [{self.cfg.execution_mode.upper()}] {self.cfg.symbol} {position["side"]}\n'
+        signal_details = '\n' + context_text(position['signal_context']) if position.get('signal_context') else ''
+        message = (f'PAPER ENTERED [{self.cfg.alert_label}] {self.cfg.symbol} {position["side"]}\n'
                    f'Trade {position["id"]}\nTrigger {trigger:.2f} | Fill {entry:.2f} (includes slippage)\n'
                    f'Target {position["target_price"]:.2f} | Protective stop {position["stop_price"]}\n'
                    f'Fill model {position["entry_fill_model"]} | Quote {audit["quote_status"]}\n'
@@ -207,7 +221,7 @@ class PaperEngine:
                    f'{self.cfg.opposite_candle_stop_points} points at close\n'
                    f'Entry candle {clock(bar.time)} | Observed {clock(now)}\n'
                    f'Exit by {clock(deadline)}\nEntry observation candle snapshot:\n{candle_text(bar)}\n'
-                   f'Signal closed candle:\n{candle_text(Bar(**signal))}')
+                   f'Signal closed candle:\n{candle_text(Bar(**signal))}{signal_details}')
         self.store.event(now, 'ENTERED', dict(position), position['id'], message)
         return True
 
@@ -226,8 +240,9 @@ class PaperEngine:
                 state = {'config': self.cfg.to_dict(), 'position': None, 'pending': None,
                          'last_closed': int(now // BAR_SECONDS)*BAR_SECONDS - 2*BAR_SECONDS}
                 self.store.event(now, 'STARTED', {'config': self.cfg.to_dict()})
-            elif state['config'] != self.cfg.to_dict():
+            elif not self.cfg.matches_saved(state['config']):
                 raise ValueError('Configuration changed for this database; use a new database for a new experiment')
+            state['config'] = self.cfg.to_dict()
             self._quote_check = quote_quality(quote_snapshot, now, self.cfg, state.get('last_quote_exchange_timestamp'))
             if self._quote_check['accepted']:
                 state['last_quote_exchange_timestamp'] = self._quote_check['exchange_timestamp']
@@ -252,16 +267,14 @@ class PaperEngine:
                         state['data_gap_reported'] = True
                     break  # Still manage fresh executable quotes in _after_bars.
                 state.pop('data_gap_reported', None)
+                context = signal_context(bar, bars, self.cfg)
+                if self.cfg.accepts_signal(bar.time):
+                    self.store.signal_context(self.cfg.symbol, bar, context)
                 had_pending = state.get('pending') is not None
                 if had_pending:
                     self._fill_pending(state, bar, now)
                     if state.get('pending'):
-                        pending = state['pending']
-                        self.store.event(now, 'ENTRY_EXPIRED', dict(pending), pending['id'],
-                            f'PAPER ENTRY EXPIRED [{self.cfg.execution_mode.upper()}] {self.cfg.symbol} {pending["side"]}\n'
-                            f'Trade setup {pending["id"]} | Trigger {pending["trigger_price"]:.2f}\n'
-                            f'No fill during the next candle:\n{candle_text(bar)}')
-                        state['pending'] = None
+                        self._expire_pending(state, now, bar)
                 was_open = state['position'] is not None
                 if was_open:
                     self._manage(state, bar, now, closed=True)
@@ -279,6 +292,11 @@ class PaperEngine:
                                 decision = 'stale_signal_skipped'
                             elif self.cfg.force_flat_at_cutoff and entry_time >= self.cfg.bounds(bar.time)[1].timestamp():
                                 decision = 'cutoff_entry_skipped'
+                            elif self.cfg.trend_filter == 'vwap_side' and not context['vwap_side_pass']:
+                                decision = 'trend_filter_rejected'
+                                self.store.event(now, 'SIGNAL_REJECTED', {
+                                    'reason': 'vwap_unavailable' if context['session_vwap'] is None else 'vwap_side_not_aligned',
+                                    'signal_candle': bar.to_dict(), 'signal_context': context})
                             elif self.cfg.entry_buffer_points is not None:
                                 direction = 1 if move > 0 else -1
                                 trigger = (bar.high + self.cfg.entry_buffer_points if direction == 1
@@ -291,12 +309,13 @@ class PaperEngine:
                                     'signal_candle': bar.to_dict(), 'signal_move': move,
                                     'entry_time': entry_time, 'trigger_price': trigger,
                                     'armed_at': now, 'expires_at': entry_time+BAR_SECONDS,
+                                    'signal_context': context, 'strategy_name': self.cfg.strategy_name,
                                 }
                                 state['pending'] = pending
                                 self.store.event(now, 'ENTRY_ARMED', pending, pending['id'],
-                                    f'PAPER ENTRY ARMED [{self.cfg.execution_mode.upper()}] {self.cfg.symbol} {pending["side"]}\n'
+                                    f'PAPER ENTRY ARMED [{self.cfg.alert_label}] {self.cfg.symbol} {pending["side"]}\n'
                                     f'Trigger {trigger:.2f} | Valid until {clock(pending["expires_at"])}\n'
-                                    f'Signal closed candle:\n{candle_text(bar)}')
+                                    f'Signal closed candle:\n{candle_text(bar)}\n{context_text(context)}')
                                 decision = 'entry_armed'
                             elif next_bar is None:
                                 # Next-bar open is not available yet; retry until delay limit.
@@ -319,6 +338,7 @@ class PaperEngine:
                                     'deadline': deadline, 'quantity': self.cfg.quantity,
                                     'config': self.cfg.to_dict(),
                                     'execution_mode': self.cfg.execution_mode,
+                                    'signal_context': context, 'strategy_name': self.cfg.strategy_name,
                                 }
                                 audit = self._audit(next_bar, now)
                                 position.update(entry_audit=audit, entry_candle_snapshot=next_bar.to_dict(),
@@ -330,7 +350,7 @@ class PaperEngine:
                                                 entry_spread_points=audit['quote']['spread_points'] if audit['quote'] else None)
                                 state['position'] = position
                                 self.store.trade(position)
-                                message = (f'PAPER ENTERED [{self.cfg.execution_mode.upper()}] {self.cfg.symbol} {position["side"]}\n'
+                                message = (f'PAPER ENTERED [{self.cfg.alert_label}] {self.cfg.symbol} {position["side"]}\n'
                                            f'Trade {position["id"]}\n'
                                            f'Next open {next_bar.open:.2f} | Fill {entry:.2f} (includes slippage)\n'
                                            f'Target {position["target_price"]:.2f} | Stop {position["stop_price"]}\n'

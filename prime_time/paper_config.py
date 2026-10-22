@@ -1,9 +1,11 @@
 """Configuration for the independent 15-minute paper strategy."""
 import json
 import math
+import re
 from dataclasses import asdict, dataclass
 from datetime import datetime, time, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 from .session import IST, NY
 
 
@@ -35,6 +37,10 @@ class PaperConfig:
     max_candle_response_age_seconds: float = 10
     max_feed_latency_seconds: float = 5
     clock_skew_tolerance_seconds: float = 2
+    strategy_name: str = 'baseline'
+    trend_filter: str = 'off'
+    vwap_session_timezone: str = 'UTC'
+    relative_volume_period: int = 20
     database: str = 'runtime/paper_candle_v4.sqlite3'
 
     def __post_init__(self):
@@ -70,6 +76,24 @@ class PaperConfig:
             raise ValueError('execution_mode must be quote or candle_touch')
         if self.execution_mode == 'quote' and self.entry_buffer_points is None:
             raise ValueError('Quote mode requires a buffered entry trigger')
+        if not re.fullmatch(r'[A-Za-z0-9_-]{1,48}', self.strategy_name):
+            raise ValueError('strategy_name must be 1-48 letters, numbers, underscores or hyphens')
+        if self.trend_filter not in ('off', 'vwap_side'):
+            raise ValueError('trend_filter must be off or vwap_side')
+        if not isinstance(self.relative_volume_period, int) or not 1 <= self.relative_volume_period <= 96:
+            raise ValueError('relative_volume_period must be between 1 and 96')
+        ZoneInfo(self.vwap_session_timezone)
+
+    @property
+    def alert_label(self):
+        return self.execution_mode.upper() + '/' + self.strategy_name
+
+    def matches_saved(self, saved):
+        # Logging-only defaults may be added to an existing baseline experiment.
+        # Any strategy/threshold change still requires another database.
+        defaults = {'strategy_name': 'baseline', 'trend_filter': 'off',
+                    'vwap_session_timezone': 'UTC', 'relative_volume_period': 20}
+        return dict(defaults, **saved) == self.to_dict()
 
     def to_dict(self):
         return asdict(self)

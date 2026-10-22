@@ -35,6 +35,10 @@ This application cannot submit exchange orders.
 
 ## Execution modes
 
+All quote-mode expiry paths use **"no fresh executable trigger observed"**.
+This does not claim that an unobserved crossing was impossible during missing
+or rejected quote data. Baseline trading rules remain unchanged.
+
 The default `paper_config.json` uses **`execution_mode: "quote"`** and
 `runtime/paper_quote_v4.sqlite3`. A BUY trigger is confirmed by fresh ask >=
 trigger, a SELL by fresh bid <= trigger. BUY entry fills at observed ask plus
@@ -48,6 +52,61 @@ For comparison, `paper_candle_config.json` selects **`candle_touch`** with
 including trigger/open fills and historical recovery. Telegram messages, trade
 records, status and exports identify the execution mode. These modes represent
 separate experiments and must not share a database.
+
+## Signal evidence and optional VWAP-side variant
+
+Every eligible closed signal candle logs session VWAP, prior VWAP, VWAP change
+in points, signal close relative to VWAP, volume, and relative volume. VWAP uses
+**HLC3 × volume**, resetting at **UTC midnight** by default. Configure
+`vwap_session_timezone` to match your chart's actual session reset; a chart's
+display timezone alone does not establish its VWAP reset. Missing bars from
+session start make VWAP unavailable rather than silently calculating a partial
+session. Zero volume and insufficient warmup are explicit.
+
+`relative_volume_period: 20` means signal volume divided by the arithmetic
+average of the **previous 20 completed bars**, excluding the signal candle.
+Developing/future candles are excluded from all signal features. VWAP change is
+current session VWAP minus its prior closed-bar value; it is logged, not gated.
+Warmup requests include the full session and preceding volume lookback.
+
+`paper_trend_config.json` runs the separate **QUOTE/vwap_side** variant using
+`runtime/paper_quote_trend_v1.sqlite3`. It requires BUY signal close > session
+VWAP, or SELL close < VWAP. Equality or unavailable VWAP rejects the signal with
+a logged reason. Stops, target, timing, buffer and fees stay identical. Relative
+volume and VWAP slope remain diagnostic only, avoiding several simultaneous
+strategy changes. The default `paper_config.json` keeps `trend_filter: off`.
+
+Armed/entered Telegram alerts include VWAP/trend/RVOL context; pending entries
+and trades retain the original signal context even as later candles change.
+`export` includes `signal_analysis.csv` (flat rows with decisions) and
+`signal_contexts.csv`. Filter rejections are recorded as `SIGNAL_REJECTED`
+events. Labels include both execution mode and strategy, for example
+`QUOTE/baseline` and `QUOTE/vwap_side`.
+
+The logging-only defaults can be added to an existing v4 baseline database on
+restart. This does not rewrite existing trade snapshots or change its entry/exit
+rules. Enabling the filter or changing thresholds/session settings still needs
+a separate database.
+
+Test the variants on historical OHLC proxy data:
+
+```powershell
+.\.venv\Scripts\python.exe -m prime_time.compare_trend --data data/BTC_5m.csv --output reports/trend_comparison
+```
+
+This runs matched **candle-touch** baseline and VWAP-filtered simulations and
+exports separate databases, trades, features and `comparison.json`. Each run
+requires a new output directory. It does not reproduce quote fills or provide
+out-of-sample validation. The supplied July 2025–January 2026 proxy produced:
+
+| Candle-touch test | Trades | Net points | Average net points/trade |
+| --- | ---: | ---: | ---: |
+| Baseline | 393 | -56,282.18 | -143.21 |
+| VWAP-side filter | 301 | -47,380.88 | -157.41 |
+
+Both lost after configured costs. The filtered version traded less and had a
+worse per-trade average, so lower total loss is not proof of a better edge.
+Compare the separate quote-mode variants prospectively before drawing conclusions.
 
 Candle-touch example: the 17:30 candle opens at 100,000, reaches a high of 100,300 and closes
 at 100,250. Arm BUY at 100,330 for the 17:45–18:00 candle. If price touches it,
@@ -227,6 +286,7 @@ deploy/           AWS Ubuntu systemd unit and deployment instructions
 docs/             Earlier opening-range baseline notes
 paper_config.json Quote-mode configuration
 paper_candle_config.json Candle-touch comparison configuration
+paper_trend_config.json Optional VWAP-side quote variant
 config.json       Earlier opening-range research configuration
 .env.example      Credential template; actual .env stays private
 config.example.py Private config.py template; actual config.py stays private

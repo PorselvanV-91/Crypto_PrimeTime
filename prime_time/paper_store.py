@@ -31,6 +31,9 @@ class Store:
             CREATE TABLE IF NOT EXISTS feed_snapshots (
                 id INTEGER PRIMARY KEY AUTOINCREMENT, observed_at REAL NOT NULL,
                 execution_mode TEXT NOT NULL, data TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS signal_contexts (
+                symbol TEXT, time INTEGER, strategy_name TEXT, data TEXT NOT NULL,
+                PRIMARY KEY(symbol,time,strategy_name));
         ''')
 
     @contextmanager
@@ -68,6 +71,10 @@ class Store:
         self.db.execute('INSERT INTO feed_snapshots(observed_at,execution_mode,data) VALUES(?,?,?)',
                         (now, execution_mode, json.dumps(data)))
 
+    def signal_context(self, symbol, bar, context):
+        self.db.execute('INSERT OR REPLACE INTO signal_contexts VALUES(?,?,?,?)',
+                        (symbol, bar.time, context['strategy_name'], json.dumps(context)))
+
     def flush_telegram(self, telegram, now, logger):
         if not telegram.enabled:
             return
@@ -88,7 +95,7 @@ class Store:
     def export(self, directory):
         directory = Path(directory)
         directory.mkdir(parents=True, exist_ok=True)
-        for table in ('trades', 'events', 'candles', 'outbox', 'feed_snapshots'):
+        for table in ('trades', 'events', 'candles', 'outbox', 'feed_snapshots', 'signal_contexts'):
             rows = self.db.execute(f'SELECT * FROM {table}').fetchall()
             with (directory / f'{table}.csv').open('w', newline='', encoding='utf-8') as file:
                 keys = [r[1] for r in self.db.execute(f'PRAGMA table_info({table})')]
@@ -105,6 +112,15 @@ class Store:
             for trade in trades:
                 writer.writerow({k: json.dumps(v) if isinstance(v, (dict, list)) else v
                                  for k, v in trade.items()})
+        contexts = []
+        for row in self.db.execute('SELECT s.symbol,s.data,c.decision FROM signal_contexts s '
+                                   'LEFT JOIN candles c ON c.symbol=s.symbol AND c.time=s.time ORDER BY s.time'):
+            contexts.append(dict(json.loads(row['data']), symbol=row['symbol'], decision=row['decision']))
+        keys = sorted({key for row in contexts for key in row}) or ['signal_time', 'strategy_name']
+        with (directory / 'signal_analysis.csv').open('w', newline='', encoding='utf-8') as file:
+            writer = csv.DictWriter(file, fieldnames=keys)
+            writer.writeheader()
+            writer.writerows(contexts)
 
     def close(self):
         self.db.close()

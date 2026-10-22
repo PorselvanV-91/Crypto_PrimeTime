@@ -90,7 +90,8 @@ python -m prime_time paper --config paper_candle_config.json
 ```
 
 It uses `runtime/paper_candle_v4.sqlite3` and `runtime/paper_candle_v4.log`.
-Messages are labeled `[QUOTE]` or `[CANDLE_TOUCH]`. Do not run both modes against
+Messages include execution mode and strategy, such as `[QUOTE/baseline]` or
+`[CANDLE_TOUCH/baseline]`. Do not run both modes against
 one database. Inspect/export the comparison independently:
 
 ```bash
@@ -116,6 +117,49 @@ Keep the server clock synchronized. Default quote/response age limits are 10s,
 request latency 5s, future skew tolerance 2s. These are in both config files.
 OHLC-only replay requires `--config paper_candle_config.json`; quote fills need
 actual timestamped quote observations and cannot be reconstructed from OHLC.
+
+## Optional VWAP-side experiment in tmux
+
+The existing baseline now logs VWAP/trend and relative volume without changing
+its entry/exit rules. Its v4 database accepts the added logging-only defaults on
+restart. Pull the update after stopping the runner with Ctrl+C, then restart
+`python -m prime_time paper` in its existing tmux session. Private `config.py`
+stays unchanged. Add a separate session for the filtered experiment:
+
+```bash
+tmux new -s prime-trend
+cd ~/Crypto_PrimeTime
+source ~/botenv/bin/activate
+python -m prime_time paper --config paper_trend_config.json
+```
+
+It uses `runtime/paper_quote_trend_v1.sqlite3` and
+`runtime/paper_quote_trend_v1.log`. Baseline remains
+`runtime/paper_quote_v4.sqlite3`. Telegram labels identify `QUOTE/baseline` or
+`QUOTE/vwap_side`. The variant only allows BUY closes above session VWAP and
+SELL closes below it; VWAP slope and relative volume are logged, not filtered.
+Missing session history prevents the variant from arming entries.
+
+```bash
+python -m prime_time status --database runtime/paper_quote_trend_v1.sqlite3
+python -m prime_time export --database runtime/paper_quote_trend_v1.sqlite3 --output reports/trend
+```
+
+Inspect `signal_analysis.csv` for VWAP, its delta, close-to-VWAP distance,
+relative volume against the prior 20 closed candles, and rejection decisions.
+Session VWAP resets at UTC midnight; change `vwap_session_timezone` only in a
+new experiment if your chart uses another anchor. Check `vwap_status` and
+`relative_volume_status` for warmup or missing-data limitations. The runner
+requests warmup automatically; no model files or additional packages are needed.
+
+With an optional historical CSV copied locally, reproduce the paired candle proxy:
+
+```bash
+python -m prime_time.compare_trend --data data/BTC_5m.csv --output reports/trend_comparison
+```
+
+This is not quote-mode backtesting. The historical test remained negative in
+both variants, so the filter remains experimental and off in the baseline.
 
 ## Alternative: systemd checkout and setup
 

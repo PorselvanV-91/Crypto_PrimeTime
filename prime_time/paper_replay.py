@@ -3,6 +3,8 @@ from .backtest import load_candles
 from .market_data import Bar
 from .paper_config import BAR_SECONDS
 from .paper_engine import PaperEngine
+from .signal_context import history_start
+from collections import deque
 
 
 def aggregate_csv(path, source_minutes=5):
@@ -30,8 +32,12 @@ def replay(config, store, bars):
     if store.load_state() is not None:
         raise ValueError('Replay requires a new database; choose another --database path')
     engine = PaperEngine(config, store)
+    history = deque()
     for index, bar in enumerate(bars):
-        snapshot = [bar]
+        history.append(bar)
+        while history and history[0].time < history_start(bar.time, config):
+            history.popleft()
+        snapshot = list(history)
         next_bar = bars[index+1] if index+1 < len(bars) else None
         now = bar.time + BAR_SECONDS + config.close_confirmation_seconds
         if next_bar and next_bar.time == bar.time + BAR_SECONDS:
@@ -58,6 +64,7 @@ def paper_summary(store):
         drawdown = max(drawdown, peak-equity)
     return {'closed_trades': len(closed), 'open_trades': len(rows)-len(closed),
             'execution_mode': state['config'].get('execution_mode', 'legacy_candle_model') if state else None,
+            'strategy_name': state['config'].get('strategy_name', 'baseline') if state else None,
             'execution_modes': sorted({r.get('execution_mode', 'legacy_candle_model') for r in rows}),
             'target_hits': sum(r['exit_reason'] == 'target' for r in closed),
             'net_win_rate': sum(x > 0 for x in net)/len(net) if net else 0,

@@ -12,6 +12,7 @@ from .paper_config import BAR_SECONDS
 from .paper_engine import create_engine
 from .paper_store import Store
 from .telegram import Telegram, load_env
+from .signal_context import history_start
 
 
 @contextmanager
@@ -63,11 +64,11 @@ def run_paper(config, once=False, env_file='.env'):
             store = Store(config.database)
             try:
                 saved = store.load_state()
-                if saved and saved['config'] != config.to_dict():
+                if saved and not config.matches_saved(saved['config']):
                     raise ValueError('Configuration differs from persisted run; choose another database')
                 engine = create_engine(config, store)
                 feed = DeltaCandles(config)
-                logger.info('Paper service started: %s [%s]; Telegram %s', config.symbol, config.execution_mode,
+                logger.info('Paper service started: %s [%s]; Telegram %s', config.symbol, config.alert_label,
                             'enabled' if telegram.enabled else 'disabled (outbox retained)')
                 failures = 0
                 last_health = None
@@ -75,11 +76,12 @@ def run_paper(config, once=False, env_file='.env'):
                     try:
                         now = time.time()
                         state = store.load_state()
-                        if state and state['config'] != config.to_dict():
+                        if state and not config.matches_saved(state['config']):
                             raise ValueError('Configuration differs from persisted run; choose another database')
                         start = int(now // BAR_SECONDS)*BAR_SECONDS - 2*BAR_SECONDS
                         if state and (state['position'] or state.get('pending')):
                             start = state['last_closed'] + BAR_SECONDS
+                        start = min(start, history_start(now, config))
                         # Cap below Delta's 2000-bar limit; catch up in successive polls.
                         end = min(int(now), start + 1000*BAR_SECONDS)
                         try:
