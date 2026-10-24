@@ -34,6 +34,9 @@ class Store:
             CREATE TABLE IF NOT EXISTS signal_contexts (
                 symbol TEXT, time INTEGER, strategy_name TEXT, data TEXT NOT NULL,
                 PRIMARY KEY(symbol,time,strategy_name));
+            CREATE TABLE IF NOT EXISTS hold_diagnostics (
+                trade_id TEXT, candle_time INTEGER, data TEXT NOT NULL,
+                PRIMARY KEY(trade_id,candle_time));
         ''')
 
     @contextmanager
@@ -75,6 +78,10 @@ class Store:
         self.db.execute('INSERT OR REPLACE INTO signal_contexts VALUES(?,?,?,?)',
                         (symbol, bar.time, context['strategy_name'], json.dumps(context)))
 
+    def hold_diagnostic(self, record):
+        self.db.execute('INSERT OR REPLACE INTO hold_diagnostics VALUES(?,?,?)',
+                        (record['trade_id'], record['candle_open_time'], json.dumps(record)))
+
     def flush_telegram(self, telegram, now, logger):
         if not telegram.enabled:
             return
@@ -95,7 +102,7 @@ class Store:
     def export(self, directory):
         directory = Path(directory)
         directory.mkdir(parents=True, exist_ok=True)
-        for table in ('trades', 'events', 'candles', 'outbox', 'feed_snapshots', 'signal_contexts'):
+        for table in ('trades', 'events', 'candles', 'outbox', 'feed_snapshots', 'signal_contexts', 'hold_diagnostics'):
             rows = self.db.execute(f'SELECT * FROM {table}').fetchall()
             with (directory / f'{table}.csv').open('w', newline='', encoding='utf-8') as file:
                 keys = [r[1] for r in self.db.execute(f'PRAGMA table_info({table})')]
@@ -121,6 +128,12 @@ class Store:
             writer = csv.DictWriter(file, fieldnames=keys)
             writer.writeheader()
             writer.writerows(contexts)
+        held = [json.loads(row['data']) for row in self.db.execute('SELECT data FROM hold_diagnostics ORDER BY candle_time,trade_id')]
+        keys = sorted({key for row in held for key in row}) or ['trade_id', 'candle_open_time']
+        with (directory / 'hold_analysis.csv').open('w', newline='', encoding='utf-8') as file:
+            writer = csv.DictWriter(file, fieldnames=keys)
+            writer.writeheader()
+            writer.writerows(held)
 
     def close(self):
         self.db.close()

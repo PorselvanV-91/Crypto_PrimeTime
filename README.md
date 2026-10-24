@@ -218,6 +218,41 @@ execution rather than claiming an unavailable protective fill.
 
 ## Telegram and logs
 
+Held-candle alerts now include session VWAP at that completed candle, estimated
+net P&L if closed at the quote observed when the alert is produced, and observed
+quote MFE/MAE. MFE uses `max(0, direction × (executable quote − filled entry))`;
+MAE uses the maximum opposite movement as a nonnegative magnitude. Long positions
+use bid, shorts use ask. These movement measures exclude exit slippage and fees;
+the close-now net estimate includes configured exit slippage and both entry/exit
+fees, then multiplies by modeled quantity for USD P&L.
+
+Only validated live quotes observed while holding contribute to the path.
+Duplicate cached quotes do not add unique samples; missing/stale/rejected quotes
+never update extrema or supply a current mark. When the mark is unavailable,
+P&L is explicitly unavailable, while previously observed extrema remain labeled
+with coverage/sample information. Candle highs/lows never substitute for quote
+excursions, and OHLC-only replay cannot generate them.
+
+VWAP excludes the developing next candle and retains its session/history status.
+The P&L mark and path extrema are as of the diagnostic observation, often a few
+seconds after candle close, not a claim about the exact historical close. Delayed
+recovery records include the observation delay and quote timestamp. Values are
+sampled extrema, not the full market path; feed gaps can miss movements.
+
+Diagnostics persist with the open position across restarts and are retained on
+the closed trade. Existing v4 positions can continue after this logging-only
+update: coverage begins at first observation after the update and is marked as
+not including entry, rather than inventing earlier excursions. No thresholds,
+entry rules or exit rules change. Both quote baseline and VWAP-side variant use
+the same diagnostics.
+
+Exports add `hold_analysis.csv` (one flat row per held candle, including the final
+closed candle before a timeout), `hold_diagnostics.csv`, and `HOLD_DIAGNOSTIC`
+events. Each record identifies strategy and trade ID. Final trade rows also
+include `observed_mfe_points`, `observed_mae_points`, and `observed_quote_samples`.
+For a trade that exits intrabar, the exit alert includes the sampled extrema up
+to its exit quote, even if no candle closed while holding.
+
 Alerts are sent when a trigger is armed or expires, on entry, each completed candle while holding, and exit. They
 include trade ID, direction, prices, candle OHLC/body movement, IST timestamps,
 and exit reason/net result when closed. Every scanned closed candle and decision

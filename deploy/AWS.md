@@ -161,6 +161,26 @@ python -m prime_time.compare_trend --data data/BTC_5m.csv --output reports/trend
 This is not quote-mode backtesting. The historical test remained negative in
 both variants, so the filter remains experimental and off in the baseline.
 
+## Held-candle diagnostic update
+
+No new settings, dependencies or database paths are needed. Stop each running
+tmux bot with Ctrl+C, run `git pull --ff-only`, then restart it with its original
+config. Open paper positions resume from the same database. New diagnostic
+columns start collecting from that restart; earlier quote extrema are not
+backfilled from candle data. Strategy behavior remains unchanged.
+
+Every held-candle alert includes closed-bar VWAP, current close-now estimated
+net P&L, and sampled executable-quote MFE/MAE. Long marks use bid, short marks
+use ask; net marks include exit slippage and both fees. Stale/missing quotes show
+the mark as unavailable. The diagnostic includes its delay after candle close;
+recovery observations must not be read as historical close prices.
+
+Use the existing export commands to obtain `hold_analysis.csv` and
+`hold_diagnostics.csv`. Final trade rows retain observed excursion summaries.
+MFE/MAE use only valid quotes seen while holding; quote gaps and intrabar moves
+between polls are not reconstructed. Coverage is marked partial for a position
+opened before diagnostic logging was installed.
+
 ## Alternative: systemd checkout and setup
 
 Push this repository to your own Git remote, then use that remote URL below.

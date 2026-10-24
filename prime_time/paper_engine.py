@@ -5,6 +5,7 @@ from .paper_config import BAR_SECONDS
 from .session import IST
 from .feed_quality import quote_quality, candle_quality
 from .signal_context import signal_context, context_text
+from .hold_diagnostics import observe_position, make_hold_record, diagnostic_text
 
 
 def clock(timestamp):
@@ -31,6 +32,7 @@ class PaperEngine:
         self._quote_check = {'accepted': False, 'status': 'missing_quote'}
         self._candle_evidence = None
         self._candle_check = {}
+        self._diagnostic_bars = []
 
     def _quote_for(self, bar, now):
         snapshot = self._quote
@@ -59,6 +61,20 @@ class PaperEngine:
 
     def _after_bars(self, state, now):
         pass
+
+    def _observe_position(self, position, now):
+        return observe_position(position, self._quote, self._quote_check, self._mode, now, self.cfg)
+
+    def _record_hold_diagnostics(self, position, bar, now):
+        self._observe_position(position, now)
+        context = signal_context(bar, self._diagnostic_bars, self.cfg)
+        record = make_hold_record(position, bar, context, now, self.cfg)
+        record.update(vwap_response_status=self._candle_check.get('status'),
+                      vwap_response_accepted=self._candle_check.get('accepted', False))
+        self.store.hold_diagnostic(record)
+        self.store.event(now, 'HOLD_DIAGNOSTIC', record, position['id'])
+        position['last_hold_diagnostics'] = record
+        return record
 
     def _expire_pending(self, state, now, bar=None):
         pending = state.get('pending')
@@ -97,7 +113,14 @@ class PaperEngine:
                         exit_bid=audit['quote']['bid'] if audit['quote'] else None,
                         exit_ask=audit['quote']['ask'] if audit['quote'] else None)
         position['execution_mode'] = self.cfg.execution_mode
+        metrics = position.get('quote_diagnostics')
+        if metrics:
+            position.update(observed_mfe_points=metrics['mfe_points'], observed_mae_points=metrics['mae_points'],
+                            observed_quote_samples=metrics['unique_quote_samples'],
+                            diagnostic_coverage_start_observed_at=metrics['coverage_start_observed_at'])
         self.store.trade(position)
+        excursion_text = (f'\nObserved quote MFE {metrics["mfe_points"]} | MAE {metrics["mae_points"]} points | '
+                          f'Samples {metrics["unique_quote_samples"]}' if metrics else '')
         message = (f'PAPER CLOSED [{self.cfg.alert_label}] {self.cfg.symbol} {position["side"]}\n'
                    f'Trade {position["id"]}\n{reason.upper()} | '
                    f'Entry {position["entry_price"]:.2f} → Exit {exit_price:.2f}\n'
@@ -109,7 +132,7 @@ class PaperEngine:
                    f'Observed {clock(now)}\n'
                    f'Candle source {position.get("exit_candle_source", "market_candle")}\n'
                    f'{"Closed candle" if bar.time + BAR_SECONDS <= now else "Developing candle snapshot"}:\n'
-                   f'{candle_text(bar)}')
+                   f'{candle_text(bar)}{excursion_text}')
         self.store.event(now, 'CLOSED', dict(position), position['id'], message)
         state['position'] = None
 
@@ -117,6 +140,7 @@ class PaperEngine:
         position = state['position']
         if position is None or bar.time < position['entry_time']:
             return
+        diagnostic = self._record_hold_diagnostics(position, bar, now) if closed else None
         direction = position['direction']
         stop = position['stop_price']
         stop_hit = stop is not None and (bar.low <= stop if direction == 1 else bar.high >= stop)
@@ -163,7 +187,8 @@ class PaperEngine:
                            f'Trade {position["id"]} | Candle {bars_held}/{self.cfg.hold_candles}\n'
                            f'Entry {position["entry_price"]:.2f} | Target {position["target_price"]:.2f}\n'
                            f'Closed candle:\n{candle_text(bar)}')
-                self.store.event(now, 'HOLD', {'bar': bar.to_dict(), 'bars_held': bars_held},
+                message += '\n' + diagnostic_text(diagnostic)
+                self.store.event(now, 'HOLD', {'bar': bar.to_dict(), 'bars_held': bars_held, 'diagnostics': diagnostic},
                                  position['id'], message)
 
     def _fill_pending(self, state, bar, now):
@@ -205,6 +230,7 @@ class PaperEngine:
                             entry_timing='observed_quote', entry_quote_exchange_timestamp=self._quote_check['exchange_timestamp'],
                             entry_fill_observed_at=now)
         state['position'], state['pending'] = position, None
+        self._observe_position(position, now)
         self.store.trade(position)
         signal = pending['signal_candle']
         signal_details = '\n' + context_text(position['signal_context']) if position.get('signal_context') else ''
@@ -229,6 +255,7 @@ class PaperEngine:
         if mode not in ('live', 'replay', 'candle_model'):
             raise ValueError('Unknown execution evidence mode')
         self._quote, self._mode = quote_snapshot, mode
+        self._diagnostic_bars = bars
         self._candle_evidence = candle_evidence
         self._candle_check = candle_quality(candle_evidence, bars, now, self.cfg)
         by_time = {bar.time: bar for bar in bars}
@@ -246,6 +273,8 @@ class PaperEngine:
             self._quote_check = quote_quality(quote_snapshot, now, self.cfg, state.get('last_quote_exchange_timestamp'))
             if self._quote_check['accepted']:
                 state['last_quote_exchange_timestamp'] = self._quote_check['exchange_timestamp']
+            if state['position']:
+                self._observe_position(state['position'], now)
             health = {'quote': self._quote_check['status'], 'candles': self._candle_check['status']}
             if mode == 'live' and health != state.get('feed_health'):
                 self.store.event(now, 'FEED_HEALTH', health)
@@ -349,6 +378,7 @@ class PaperEngine:
                                                 entry_ask=audit['quote']['ask'] if audit['quote'] else None,
                                                 entry_spread_points=audit['quote']['spread_points'] if audit['quote'] else None)
                                 state['position'] = position
+                                self._observe_position(position, now)
                                 self.store.trade(position)
                                 message = (f'PAPER ENTERED [{self.cfg.alert_label}] {self.cfg.symbol} {position["side"]}\n'
                                            f'Trade {position["id"]}\n'
@@ -375,6 +405,8 @@ class PaperEngine:
                     self._fill_pending(state, current, now)
                     self._manage(state, current, now, closed=False)
             self._after_bars(state, now)
+            if state['position']:
+                self.store.trade(state['position'])
             self.store.save_state(state)
         return self.store.load_state()
 

@@ -2,6 +2,7 @@
 from .market_data import Bar
 from .paper_config import BAR_SECONDS
 from .paper_engine import PaperEngine, candle_text
+from .hold_diagnostics import diagnostic_text
 
 
 class QuotePaperEngine(PaperEngine):
@@ -67,6 +68,7 @@ class QuotePaperEngine(PaperEngine):
         if position is None or bar.time < position['entry_time']:
             return
         if closed:
+            diagnostic = self._record_hold_diagnostics(position, bar, now)
             direction = position['direction']
             if (self.cfg.opposite_candle_stop_points is not None and
                     direction*(bar.close-bar.open) <= -self.cfg.opposite_candle_stop_points):
@@ -76,11 +78,11 @@ class QuotePaperEngine(PaperEngine):
                 self._request_exit(position, 'cutoff' if position['deadline'] < full_deadline else 'timeout', position['deadline'], now, bar)
             elif not position.get('requested_exit'):
                 held = (bar.time-position['entry_time'])//BAR_SECONDS+1
-                self.store.event(now, 'HOLD', {'bar': bar.to_dict(), 'bars_held': held}, position['id'],
+                self.store.event(now, 'HOLD', {'bar': bar.to_dict(), 'bars_held': held, 'diagnostics': diagnostic}, position['id'],
                     f'PAPER HOLD [{self.cfg.alert_label}] {self.cfg.symbol} {position["side"]}\n'
                     f'Trade {position["id"]} | Candle {held}/{self.cfg.hold_candles}\n'
                     f'Entry {position["entry_price"]:.2f} | Target {position["target_price"]:.2f}\n'
-                    f'Protective stop {position["stop_price"]}\nClosed candle:\n{candle_text(bar)}')
+                    f'Protective stop {position["stop_price"]}\nClosed candle:\n{candle_text(bar)}\n{diagnostic_text(diagnostic)}')
         self._exit_on_quote(state, now)
 
     def _after_bars(self, state, now):
