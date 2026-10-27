@@ -2,6 +2,7 @@
 import csv
 import json
 import sqlite3
+import time
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -82,12 +83,15 @@ class Store:
         self.db.execute('INSERT OR REPLACE INTO hold_diagnostics VALUES(?,?,?)',
                         (record['trade_id'], record['candle_open_time'], json.dumps(record)))
 
-    def flush_telegram(self, telegram, now, logger):
+    def flush_telegram(self, telegram, now, logger, stop_event=None):
         if not telegram.enabled:
             return
         rows = self.db.execute('SELECT * FROM outbox WHERE sent_at IS NULL AND next_attempt<=? '
                                'ORDER BY event_id LIMIT 5', (now,)).fetchall()
         for row in rows:
+            if stop_event is not None and stop_event.is_set():
+                break
+            started = time.monotonic()
             try:
                 telegram.send_telegram_alert(row['message'])
             except Exception:
@@ -95,9 +99,16 @@ class Store:
                 self.db.execute('UPDATE outbox SET attempts=?,next_attempt=? WHERE event_id=?',
                                 (attempts, now + min(300, 2 ** min(attempts, 8)), row['event_id']))
                 logger.warning('Telegram delivery failed for event %s; will retry', row['event_id'])
+                logger.info('TELEGRAM_TIMING event_id=%s send_seconds=%.6f result=failed',
+                            row['event_id'], time.monotonic()-started)
                 break
             else:
-                self.db.execute('UPDATE outbox SET sent_at=? WHERE event_id=?', (now, row['event_id']))
+                completed = time.time()
+                send_seconds = time.monotonic()-started
+                ack_started = time.monotonic()
+                self.db.execute('UPDATE outbox SET sent_at=? WHERE event_id=?', (completed, row['event_id']))
+                logger.info('TELEGRAM_TIMING event_id=%s send_seconds=%.6f ack_seconds=%.6f result=sent',
+                            row['event_id'], send_seconds, time.monotonic()-ack_started)
 
     def export(self, directory):
         directory = Path(directory)

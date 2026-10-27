@@ -174,3 +174,45 @@ class HeldCandleTests(unittest.TestCase):
         self.assertEqual(self.store.db.execute('SELECT count(*) FROM hold_diagnostics').fetchone()[0], 4)
         trade = json.loads(self.store.db.execute('SELECT data FROM trades').fetchone()[0])
         self.assertEqual(trade['exit_reason'], 'timeout')
+
+    def test_timeout_before_confirmation_recovers_final_diagnostic_after_restart(self):
+        for n in range(1, 4):
+            bar = Bar(self.t+n*900, 1250, 1400, 1000, 1300, 10)
+            self.step([bar], bar.time+902, bid=1300, ask=1301)
+            self.history.append(bar)
+        final_bar = Bar(self.t+3600, 1300, 1400, 1200, 1310, 10)
+        deadline = self.t+4500
+        state = self.step([final_bar], deadline+1, bid=1300, ask=1301)
+        self.assertIsNone(state['position'])
+        self.assertEqual(len(state['pending_final_diagnostics']), 1)
+        trade = json.loads(self.store.db.execute('SELECT data FROM trades').fetchone()[0])
+        frozen = dict(trade['quote_diagnostics'])
+        self.assertEqual(trade['exit_observed_at'], deadline+1)
+        self.assertEqual(self.store.db.execute('SELECT count(*) FROM hold_diagnostics').fetchone()[0], 3)
+        self.engine = create_engine(self.cfg, self.store)
+        # Missing candle response must leave the durable diagnostic pending.
+        self.engine.step([], deadline+2, candle_evidence=None)
+        self.assertEqual(len(self.store.load_state()['pending_final_diagnostics']), 1)
+        state = self.step([final_bar], deadline+5, bid=99999, ask=100000)
+        self.assertEqual(state['pending_final_diagnostics'], [])
+        record = self.record()
+        self.assertEqual(record['diagnostic_type'], 'post_exit_candle_confirmation')
+        self.assertEqual(record['mark_observed_at'], deadline+1)
+        self.assertEqual(record['diagnostic_observed_at'], deadline+5)
+        self.assertEqual(record['mfe_points'], frozen['mfe_points'])
+        self.assertEqual(record['mae_points'], frozen['mae_points'])
+        self.assertEqual(record['unique_quote_samples'], frozen['unique_quote_samples'])
+        self.assertAlmostEqual(record['unrealized_net_points'], trade['net_points'])
+        self.step([final_bar], deadline+8)
+        self.assertEqual(self.store.db.execute('SELECT count(*) FROM hold_diagnostics').fetchone()[0], 4)
+        self.assertEqual(self.store.db.execute("SELECT count(*) FROM events WHERE kind='FINAL_HOLD_DIAGNOSTIC'").fetchone()[0], 1)
+
+    def test_target_at_boundary_also_gets_final_diagnostic_without_delaying_exit(self):
+        target = self.store.load_state()['position']['target_price']
+        held = Bar(self.t+900, 1250, 1600, 1200, 1500, 10)
+        state = self.step([held], self.t+1801, bid=target, ask=target+1)
+        self.assertIsNone(state['position'])
+        self.assertEqual(len(state['pending_final_diagnostics']), 1)
+        self.step([held], self.t+1803, bid=9999, ask=10000)
+        self.assertEqual(self.record()['mfe_points'], 200)
+        self.assertEqual(self.record()['mark_observed_at'], self.t+1801)

@@ -4,6 +4,34 @@ Separate paper-trading experiment using public Delta India BTCUSD candles.
 The original `C:\Next Drive\Codex\Crypto\Old` directory is untouched.
 This application cannot submit exchange orders.
 
+## Shared live paper comparison
+
+For baseline and VWAP-side comparison, stop both independent runners and use one
+process with the existing databases and settings:
+
+```bash
+python -m prime_time paper-shared --configs paper_config.json paper_trend_config.json
+```
+
+One REST collector supplies identical candles, quotes, observation timestamps
+and stream IDs/sequences to both engines. Database paths and trading rules stay
+unchanged. Telegram sends run in separate workers using the durable outboxes.
+Cached REST data and missed between-poll quotes remain limitations; this is not
+a WebSocket feed. `python -m prime_time paper` remains available for a single
+strategy and also uses background Telegram delivery and timing measurements.
+
+`runtime/paper_shared.log` contains `POLL_TIMING` records for request durations,
+per-engine processing, dispatch delays and total polling intervals, plus
+`TELEGRAM_TIMING` records for send/acknowledgment durations. Feed snapshots retain
+the same shared observation identity in both databases. Locks prevent the old
+runners from writing to those databases concurrently. See [AWS/tmux instructions](deploy/AWS.md).
+
+A held candle completed before an exit but not yet confirmed gets a durable
+pending final diagnostic. Once its candle data is confirmed, `PAPER FINAL DIAGNOSTIC`
+reports candle VWAP with the frozen exit-time quote mark and excursions. Recovery
+survives restart and never delays the exit or uses post-exit quotes. Previously
+closed historical trades are not rewritten by this update.
+
 ## Strategy
 
 1. Start checking candles **16:30 IST during US daylight saving**, **17:30 IST

@@ -45,7 +45,7 @@ source ~/botenv/bin/activate
 python -m prime_time paper
 ```
 
-Startup should say `Telegram enabled`. This confirms credentials were loaded,
+Startup should say `Telegram background workers`. This confirms credentials were loaded,
 not that Telegram accepted a message. Alerts start with a qualifying setup;
 there is no startup message. Detach with **Ctrl+B**, release, then **D**.
 Disconnect SSH freely; reconnect with `tmux attach -t prime-time`.
@@ -118,27 +118,59 @@ request latency 5s, future skew tolerance 2s. These are in both config files.
 OHLC-only replay requires `--config paper_candle_config.json`; quote fills need
 actual timestamped quote observations and cannot be reconstructed from OHLC.
 
-## Optional VWAP-side experiment in tmux
+## Baseline and VWAP comparison: one shared tmux runner
 
-The existing baseline now logs VWAP/trend and relative volume without changing
-its entry/exit rules. Its v4 database accepts the added logging-only defaults on
-restart. Pull the update after stopping the runner with Ctrl+C, then restart
-`python -m prime_time paper` in its existing tmux session. Private `config.py`
-stays unchanged. Add a separate session for the filtered experiment:
+Stop BOTH old runners with Ctrl+C in their respective tmux sessions. Keep their
+runtime databases and private config.py. Pull the code, then use ONE session for
+the shared runner (reuse the baseline session or create prime-shared):
 
 ```bash
-tmux new -s prime-trend
 cd ~/Crypto_PrimeTime
 source ~/botenv/bin/activate
-python -m prime_time paper --config paper_trend_config.json
+git pull --ff-only
+python -m unittest discover -s tests
+python -m prime_time paper-shared --configs paper_config.json paper_trend_config.json
 ```
 
-It uses `runtime/paper_quote_trend_v1.sqlite3` and
-`runtime/paper_quote_trend_v1.log`. Baseline remains
-`runtime/paper_quote_v4.sqlite3`. Telegram labels identify `QUOTE/baseline` or
+This uses the existing `runtime/paper_quote_trend_v1.sqlite3` and
+`runtime/paper_quote_v4.sqlite3`. Open positions and pending triggers resume;
+no database deletion, credential changes or dependency installation is required.
+Do not restart the two old independent commands alongside it. The shared process
+locks both databases. Ctrl+B then D detaches as usual. Telegram labels identify `QUOTE/baseline` or
 `QUOTE/vwap_side`. The variant only allows BUY closes above session VWAP and
 SELL closes below it; VWAP slope and relative volume are logged, not filtered.
 Missing session history prevents the variant from arming entries.
+
+Both engines receive one shared REST candle/quote observation with identical
+observation time and stream sequence. Separate strategies retain separate state
+and outboxes. REST caching and unobserved moves between polls remain limitations;
+this update does not enable WebSockets or alter trading rules. Existing differing
+positions or quote timestamp watermarks are preserved on migration.
+
+Each database has a separate Telegram worker and connection. Network sends do
+not run in the execution loop or hold a database transaction. Pending alerts
+survive shutdown. Delivery remains at least once, including a possible duplicate
+if the process crashes after Telegram accepts a message but before acknowledgment
+is saved. `--once` may leave newly queued messages for the next run.
+
+Watch timing from another terminal:
+
+```bash
+tail -f runtime/paper_shared.log
+```
+
+`POLL_TIMING` records the shared stream ID/sequence, observed time, start-to-start
+poll interval, candle/quote request durations, each strategy's step duration and
+dispatch delay, and total poll work. `TELEGRAM_TIMING` records send and database
+acknowledgment durations separately; `sent_at` is captured after a successful send.
+Feed snapshots in both databases contain the matching `shared_observation` ID.
+The log rotates at 5 MB with five backups; archive it when investigating older
+timing incidents. These per-poll logs can rotate within a day.
+
+An engine/database failure stops the shared comparison visibly after attempting
+both engines. Inspect logs before restarting. Their SQLite commits are separate;
+a crash between commits can leave the last observation in only one ledger, which
+the stream ID/sequence identifies. No historical missed fill is invented on restart.
 
 ```bash
 python -m prime_time status --database runtime/paper_quote_trend_v1.sqlite3
@@ -164,8 +196,8 @@ both variants, so the filter remains experimental and off in the baseline.
 ## Held-candle diagnostic update
 
 No new settings, dependencies or database paths are needed. Stop each running
-tmux bot with Ctrl+C, run `git pull --ff-only`, then restart it with its original
-config. Open paper positions resume from the same database. New diagnostic
+tmux bot with Ctrl+C, run `git pull --ff-only`, then use the shared command above
+for the two variants. Open paper positions resume from the same database. New diagnostic
 columns start collecting from that restart; earlier quote extrema are not
 backfilled from candle data. Strategy behavior remains unchanged.
 
@@ -180,6 +212,14 @@ Use the existing export commands to obtain `hold_analysis.csv` and
 MFE/MAE use only valid quotes seen while holding; quote gaps and intrabar moves
 between polls are not reconstructed. Coverage is marked partial for a position
 opened before diagnostic logging was installed.
+
+When a trade exits before a completed held candle passes the confirmation delay,
+its final diagnostic is queued durably. A later poll (or restart) adds confirmed
+candle VWAP and emits `PAPER FINAL DIAGNOSTIC`. The quote mark, net P&L and MFE/MAE
+are frozen at exit, explicitly labeled separately from the later candle context.
+No post-exit quote changes those values and the exit itself is never delayed.
+Missing candle evidence leaves the diagnostic pending. This applies prospectively;
+old closed trades with missing diagnostics are not automatically rewritten.
 
 ## Alternative: systemd checkout and setup
 

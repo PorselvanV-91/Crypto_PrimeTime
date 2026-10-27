@@ -3,9 +3,65 @@ from .market_data import Bar
 from .paper_config import BAR_SECONDS
 from .paper_engine import PaperEngine, candle_text
 from .hold_diagnostics import diagnostic_text
+from .hold_diagnostics import make_hold_record
+from .signal_context import signal_context
+from .paper_engine import clock
+import json
 
 
 class QuotePaperEngine(PaperEngine):
+    def _close(self, state, bar, raw_exit, reason, now, exact_time=None):
+        position = state['position']
+        super()._close(state, bar, raw_exit, reason, now, exact_time)
+        # An exit may precede candle confirmation or arrive during a history gap.
+        # Queue only candles actually completed while this position was held.
+        pending = state.setdefault('pending_final_diagnostics', [])
+        for candle_time in range(position['entry_time'], int(now//BAR_SECONDS)*BAR_SECONDS, BAR_SECONDS):
+            exists = self.store.db.execute(
+                'SELECT 1 FROM hold_diagnostics WHERE trade_id=? AND candle_time=?',
+                (position['id'], candle_time)).fetchone()
+            if not exists:
+                pending.append({'trade_id': position['id'], 'candle_time': candle_time})
+
+    def _complete_final_diagnostics(self, state, now):
+        pending = state.get('pending_final_diagnostics', [])
+        if not pending or not self._candle_check.get('accepted'):
+            return
+        remaining = []
+        for item in pending:
+            bar = self._bars.get(item['candle_time'])
+            if bar is None or bar.time+BAR_SECONDS+self.cfg.close_confirmation_seconds > now:
+                remaining.append(item)
+                continue
+            row = self.store.db.execute('SELECT data FROM trades WHERE id=?', (item['trade_id'],)).fetchone()
+            if row is None:
+                raise RuntimeError('Missing closed trade for pending final diagnostic')
+            position = json.loads(row[0])
+            context = signal_context(bar, self._diagnostic_bars, self.cfg)
+            # Never observe a new quote on a closed position: its mark and
+            # excursions stay frozen at execution, even on delayed recovery.
+            record = make_hold_record(position, bar, context, now, self.cfg)
+            record.update(diagnostic_type='post_exit_candle_confirmation',
+                          trade_exit_observed_at=position['exit_observed_at'],
+                          realized_net_points=position['net_points'],
+                          mark_scope='Frozen exit-time quote estimate; not a later unrealized mark',
+                          excursion_scope='Valid sampled quotes through exit only',
+                          vwap_response_status=self._candle_check.get('status'),
+                          vwap_response_accepted=True)
+            self.store.hold_diagnostic(record)
+            position['last_hold_diagnostics'] = record
+            self.store.trade(position)
+            vwap = record['vwap_at_candle_close']
+            value = f'{vwap:.2f}' if vwap is not None else 'unavailable'
+            self.store.event(now, 'FINAL_HOLD_DIAGNOSTIC', record, position['id'],
+                f'PAPER FINAL DIAGNOSTIC [{self.cfg.alert_label}] {self.cfg.symbol} {position["side"]}\n'
+                f'Trade {position["id"]} | Candle closed {clock(bar.time+BAR_SECONDS)}\n'
+                f'VWAP {value} ({self.cfg.vwap_session_timezone}) | {record["vwap_status"]}\n'
+                f'Exit-time net {position["net_points"]:+.2f} points | Exit {clock(position["exit_observed_at"])}\n'
+                f'Observed quote MFE {record["mfe_points"]} | MAE {record["mae_points"]} points\n'
+                f'Candle context confirmed {clock(now)}; quote mark and extrema frozen at exit')
+        state['pending_final_diagnostics'] = remaining
+
     def _can_arm(self, bar, now):
         return self._mode == 'live' and self._candle_check['accepted']
 
@@ -90,6 +146,7 @@ class QuotePaperEngine(PaperEngine):
         if pending and now >= pending['expires_at']:
             self._expire_pending(state, now)
         self._exit_on_quote(state, now)
+        self._complete_final_diagnostics(state, now)
 
     def step(self, bars, now, quote_snapshot=None, mode='live', candle_evidence=None):
         if mode != 'live':

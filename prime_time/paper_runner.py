@@ -1,18 +1,7 @@
-"""Foreground polling runner for tmux or systemd on AWS."""
-import logging
+"""Foreground paper runner and cross-platform database process lock."""
 import os
-import signal
-import threading
-import time
 from contextlib import contextmanager
-from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from .market_data import DeltaCandles
-from .paper_config import BAR_SECONDS
-from .paper_engine import create_engine
-from .paper_store import Store
-from .telegram import Telegram, load_env
-from .signal_context import history_start
 
 
 @contextmanager
@@ -42,90 +31,6 @@ def process_lock(path):
 
 
 def run_paper(config, once=False, env_file='.env'):
-    load_env(env_file)
-    telegram = Telegram()
-    log_directory = Path(config.database).parent
-    log_directory.mkdir(parents=True, exist_ok=True)
-    logger = logging.getLogger('prime_time.paper')
-    logger.setLevel(logging.INFO)
-    formatter = logging.Formatter('%(asctime)sZ %(levelname)s %(message)s')
-    formatter.converter = time.gmtime
-    handlers = [logging.StreamHandler(), RotatingFileHandler(
-        log_directory / (Path(config.database).stem + '.log'), maxBytes=5_000_000, backupCount=5, encoding='utf-8')]
-    for handler in handlers:
-        handler.setFormatter(formatter)
-        logger.addHandler(handler)
-    stopped = threading.Event()
-    previous_signals = {}
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        previous_signals[sig] = signal.signal(sig, lambda *_: stopped.set())
-    try:
-        with process_lock(str(config.database) + '.lock'):
-            store = Store(config.database)
-            try:
-                saved = store.load_state()
-                if saved and not config.matches_saved(saved['config']):
-                    raise ValueError('Configuration differs from persisted run; choose another database')
-                engine = create_engine(config, store)
-                feed = DeltaCandles(config)
-                logger.info('Paper service started: %s [%s]; Telegram %s', config.symbol, config.alert_label,
-                            'enabled' if telegram.enabled else 'disabled (outbox retained)')
-                failures = 0
-                last_health = None
-                while not stopped.is_set():
-                    try:
-                        now = time.time()
-                        state = store.load_state()
-                        if state and not config.matches_saved(state['config']):
-                            raise ValueError('Configuration differs from persisted run; choose another database')
-                        start = int(now // BAR_SECONDS)*BAR_SECONDS - 2*BAR_SECONDS
-                        if state and (state['position'] or state.get('pending')):
-                            start = state['last_closed'] + BAR_SECONDS
-                        start = min(start, history_start(now, config))
-                        # Cap below Delta's 2000-bar limit; catch up in successive polls.
-                        end = min(int(now), start + 1000*BAR_SECONDS)
-                        try:
-                            bars = feed.fetch(start, end)
-                            if not bars:
-                                raise RuntimeError('No candle data returned')
-                        except Exception:
-                            if config.execution_mode != 'quote':
-                                raise
-                            bars = []
-                            logger.warning('Candle feed unavailable; only fresh quote exits can execute')
-                        quote_snapshot = None
-                        try:
-                            quote_snapshot = feed.fetch_quote()
-                        except Exception as error:
-                            logger.warning('Quote unavailable (%s); execution mode remains %s', type(error).__name__, config.execution_mode)
-                        new_state = engine.step(bars, time.time(), quote_snapshot=quote_snapshot, mode='live',
-                                                candle_evidence=feed.last_candle_evidence)
-                        health = new_state.get('feed_health')
-                        if health != last_health:
-                            logger.info('Feed validation: %s', health)
-                            last_health = health
-                        failures = 0
-                    except (ValueError, RuntimeError) as error:
-                        # These messages are application controlled; no credential URLs.
-                        logger.error('%s', error)
-                        failures += 1
-                        if once:
-                            raise
-                    except Exception as error:
-                        logger.error('Market polling failed (%s); retrying', type(error).__name__)
-                        failures += 1
-                        if once:
-                            raise RuntimeError('Market polling failed') from None
-                    store.flush_telegram(telegram, time.time(), logger)
-                    if once:
-                        break
-                    stopped.wait(min(60, config.poll_seconds * 2**min(failures, 5)))
-            finally:
-                store.close()
-                logger.info('Paper service stopped')
-    finally:
-        for sig, previous in previous_signals.items():
-            signal.signal(sig, previous)
-        for handler in handlers:
-            logger.removeHandler(handler)
-            handler.close()
+    # Single-strategy users also get asynchronous delivery and timing logs.
+    from .shared_runner import run_shared
+    return run_shared([config], once=once, env_file=env_file)

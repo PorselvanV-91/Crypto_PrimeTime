@@ -21,6 +21,11 @@ def main():
     paper.add_argument('--config', type=Path, default=Path('paper_config.json'))
     paper.add_argument('--env-file', default='.env')
     paper.add_argument('--once', action='store_true', help='One market-data poll, then exit')
+    shared = sub.add_parser('paper-shared', help='Run variants against identical market observations')
+    shared.add_argument('--configs', nargs='+', type=Path,
+                        default=[Path('paper_config.json'), Path('paper_trend_config.json')])
+    shared.add_argument('--env-file', default='.env')
+    shared.add_argument('--once', action='store_true')
     replay = sub.add_parser('replay', help='Replay CSV with the paper momentum engine')
     replay.add_argument('--data', type=Path, default=Path('data/BTC_5m.csv'))
     replay.add_argument('--config', type=Path, default=Path('paper_config.json'))
@@ -33,6 +38,11 @@ def main():
     status = sub.add_parser('status', help='Show persisted paper position and results')
     status.add_argument('--database', type=Path, default=Path('runtime/paper_quote_v4.sqlite3'))
     args = parser.parse_args()
+    if args.command == 'paper-shared':
+        from .paper_config import PaperConfig
+        from .shared_runner import run_shared
+        run_shared([PaperConfig.load(path) for path in args.configs], once=args.once, env_file=args.env_file)
+        return
     if args.command == 'paper':
         from .paper_config import PaperConfig
         from .paper_runner import run_paper
