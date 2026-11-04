@@ -6,6 +6,7 @@ import signal
 import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -92,7 +93,36 @@ class SharedPoller:
         self.previous_start = None
         self.last_health = [None]*len(configs)
 
-    def poll(self):
+        self.candle_worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix='candle-history')
+        self.pending_candles = None
+        self.candle_snapshot = ([], {}, 0)
+
+    def close(self):
+        self.candle_worker.shutdown(wait=True, cancel_futures=True)
+
+    def _fetch_candles(self, start, end):
+        timer = time.monotonic()
+        try:
+            bars = self.feed.fetch(start, end)
+            if not bars:
+                raise RuntimeError('No candle data returned')
+            return bars, dict(self.feed.last_candle_evidence or {}), end
+        finally:
+            self.logger.info('CANDLE_TIMING requested_end=%s fetch_seconds=%.6f',
+                             end, time.monotonic()-timer)
+
+    def _collect_candles(self):
+        future = self.pending_candles
+        self.pending_candles = None
+        try:
+            self.candle_snapshot = future.result()
+        except Exception as error:
+            self.candle_snapshot = ([], {}, 0)
+            if self.configs[0].execution_mode != 'quote':
+                raise
+            self.logger.warning('Candle feed unavailable (%s)', type(error).__name__)
+
+    def poll(self, once=False):
         timer, wall = time.monotonic(), time.time()
         timing = {'stream_id': self.stream_id, 'sequence': self.sequence,
                   'poll_started_at': wall,
@@ -101,11 +131,13 @@ class SharedPoller:
         self.sequence += 1
         try:
             starts = []
+            has_position = False
             for cfg, store in zip(self.configs, self.stores):
                 state = store.load_state()
                 if state and not cfg.matches_saved(state['config']):
                     raise ValueError('Configuration differs from persisted run')
                 start = int(wall//BAR_SECONDS)*BAR_SECONDS-2*BAR_SECONDS
+                has_position = has_position or bool(state and state['position'])
                 if state and (state['position'] or state.get('pending')):
                     start = state['last_closed']+BAR_SECONDS
                 start = min(start, history_start(wall, cfg))
@@ -113,17 +145,13 @@ class SharedPoller:
                     start = min(start, history_start(item['candle_time'], cfg))
                 starts.append(start)
             start = min(starts)
-            fetch_timer = time.monotonic()
-            try:
-                bars = self.feed.fetch(start, min(int(wall), start+1000*BAR_SECONDS))
-                if not bars:
-                    raise RuntimeError('No candle data returned')
-            except Exception as error:
-                if self.configs[0].execution_mode != 'quote':
-                    raise
-                bars = []
-                self.logger.warning('Candle feed unavailable (%s); fresh quote exits remain active', type(error).__name__)
-            timing['candle_fetch_seconds'] = time.monotonic()-fetch_timer
+            if self.pending_candles is not None and self.pending_candles.done():
+                self._collect_candles()
+            if self.pending_candles is None:
+                self.pending_candles = self.candle_worker.submit(
+                    self._fetch_candles, start, min(int(wall), start+1000*BAR_SECONDS))
+            if self.configs[0].execution_mode != 'quote' or (once and not has_position):
+                self._collect_candles()
             fetch_timer = time.monotonic()
             try:
                 quote = self.feed.fetch_quote()
@@ -133,12 +161,24 @@ class SharedPoller:
             timing['quote_fetch_seconds'] = time.monotonic()-fetch_timer
             # One observation clock, not one clock read per strategy. Sequence is
             # recorded in both feed ledgers for exact cross-strategy matching.
+            if self.pending_candles is not None and self.pending_candles.done():
+                self._collect_candles()
+            bars, candle_evidence, requested_end = self.candle_snapshot
+            timing['candle_request_pending'] = self.pending_candles is not None
+            timing['candle_fetch_seconds'] = candle_evidence.get('request_latency_seconds')
             observed_at = time.time()
+            # Never promote a cached developing bar to a confirmed close merely
+            # because the quote clock advanced while the next request was pending.
+            confirmation = self.configs[0].close_confirmation_seconds
+            bars = [bar for bar in bars
+                    if not requested_end < bar.time+BAR_SECONDS+confirmation <= observed_at]
+            if observed_at-candle_evidence.get('observed_at', 0) > self.configs[0].max_candle_response_age_seconds:
+                bars = []
             observation_timer = time.monotonic()
             identity = dict(stream_id=self.stream_id, sequence=timing['sequence'], observed_at=observed_at)
             if quote is not None:
                 quote = dict(quote, shared_observation=identity)
-            evidence = dict(self.feed.last_candle_evidence or {}, shared_observation=identity)
+            evidence = dict(candle_evidence, shared_observation=identity)
             timing['observation_at'] = observed_at
             timing['engines'] = []
             failures = []
@@ -199,6 +239,7 @@ def run_shared(configs, once=False, env_file='.env'):
                 resources.callback(store.close)
                 stores.append(store)
             poller = SharedPoller(configs, stores, logger)
+            resources.callback(poller.close)
             workers = []
             if telegram.enabled:
                 for cfg in configs:
@@ -209,7 +250,7 @@ def run_shared(configs, once=False, env_file='.env'):
             logger.info('Paper stream started: %s; Telegram %s',
                         ', '.join(c.alert_label for c in configs), 'background workers' if workers else 'disabled; outbox retained')
             while not stopped.is_set():
-                poller.poll()
+                poller.poll(once=once)
                 for worker in workers:
                     worker.notify()
                 if once:

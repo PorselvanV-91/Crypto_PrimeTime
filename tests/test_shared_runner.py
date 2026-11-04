@@ -35,6 +35,13 @@ class SharedStreamTests(unittest.TestCase):
         self.logger = Mock()
         self.poller = SharedPoller([self.cfg, self.trend], self.stores, self.logger, self.feed)
 
+        self.addCleanup(self.poller.close)
+        # Deterministic ordinary polls: candle response arrives before the quote.
+        def quote_after_history():
+            self.poller.pending_candles.result(timeout=2)
+            return self.feed.fetch_quote.return_value
+        self.feed.fetch_quote.side_effect = quote_after_history
+
     def poll(self, now, bid=1289, ask=1290):
         self.feed.fetch_quote.return_value = dict(symbol='BTCUSD', bid=bid, ask=ask,
             spread_points=ask-bid, observed_at=now, exchange_timestamp=now, request_latency_seconds=.1)
@@ -66,9 +73,45 @@ class SharedStreamTests(unittest.TestCase):
     def test_candle_failure_keeps_quote_exits_running_for_both(self):
         self.poll(self.t+902)
         target = self.stores[0].load_state()['position']['target_price']
+        self.feed.fetch_quote.side_effect = None
         self.feed.fetch.side_effect = RuntimeError('offline')
         self.poll(self.t+912, target, target+.5)
         self.assertTrue(all(s.load_state()['position'] is None for s in self.stores))
+
+    def check_stalled_history_exit(self, level, reason):
+        self.poll(self.t+902)
+        price = self.stores[0].load_state()['position'][level]
+        started, release = threading.Event(), threading.Event()
+        def stalled(*args):
+            started.set()
+            self.assertTrue(release.wait(3), 'quote processing waited for candle history')
+            return self.bars
+        self.feed.fetch.side_effect = stalled
+        def fresh_quote():
+            self.assertTrue(started.wait(1))
+            return self.feed.fetch_quote.return_value
+        self.feed.fetch_quote.side_effect = fresh_quote
+        try:
+            self.poll(self.t+906)  # Still holding during the first stalled poll.
+            timing = self.poll(self.t+916, price, price+0.5)
+            self.assertTrue(timing['candle_request_pending'])
+            self.assertFalse(self.poller.pending_candles.done())
+            self.assertEqual(self.feed.fetch.call_count, 2)  # No requests piling up.
+            trades = [json.loads(store.db.execute('SELECT data FROM trades').fetchone()[0])
+                      for store in self.stores]
+            for trade in trades:
+                self.assertEqual(trade['exit_reason'], reason)
+                self.assertEqual(trade['exit_bid'], price)
+                self.assertEqual(trade['exit_time'], self.t+916)
+            self.assertEqual(trades[0]['exit_audit']['quote'], trades[1]['exit_audit']['quote'])
+        finally:
+            release.set()
+
+    def test_target_during_stalled_history(self):
+        self.check_stalled_history_exit('target_price', 'target')
+
+    def test_protective_stop_during_stalled_history(self):
+        self.check_stalled_history_exit('stop_price', 'protective_stop')
 
     def test_missing_quote_cannot_create_fills(self):
         self.feed.fetch_quote.side_effect = RuntimeError('offline')
